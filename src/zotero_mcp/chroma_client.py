@@ -97,6 +97,44 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
         return embeddings
 
 
+class LocalEmbeddingFunction(EmbeddingFunction):
+    """Custom local embedding function for ChromaDB using sentence-transformers."""
+    
+    def __init__(self, model_name: str, device: Optional[str] = None):
+        if not model_name:
+            raise ValueError(
+                "model_name is required for local embeddings. "
+                "Choose from: 'all-mpnet-base-v2', 'multi-qa-mpnet-base-dot-v1', "
+                "'sentence-transformers/all-MiniLM-L12-v2', etc."
+            )
+        
+        self.model_name = model_name
+        self.device = device or ("cuda" if self._cuda_available() else "cpu")
+        
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(model_name, device=self.device)
+        except ImportError:
+            raise ImportError("sentence-transformers package is required for local embeddings")
+    
+    def _cuda_available(self) -> bool:
+        """Check if CUDA is available."""
+        try:
+            import torch
+            return torch.cuda.is_available()
+        except ImportError:
+            return False
+    
+    def name(self) -> str:
+        """Return the name of this embedding function."""
+        return "local"
+    
+    def __call__(self, input: Documents) -> Embeddings:
+        """Generate embeddings using local model."""
+        embeddings = self.model.encode(input, convert_to_numpy=True)
+        return embeddings.tolist()
+
+
 class ChromaClient:
     """ChromaDB client for Zotero semantic search."""
     
@@ -175,6 +213,16 @@ class ChromaClient:
             model_name = self.embedding_config.get("model_name", "models/text-embedding-004")
             api_key = self.embedding_config.get("api_key")
             return GeminiEmbeddingFunction(model_name=model_name, api_key=api_key)
+        
+        elif self.embedding_model == "local":
+            model_name = self.embedding_config.get("model_name")
+            if not model_name:
+                raise ValueError(
+                    "Local embedding model requires 'model_name' in config. "
+                    "Specify a HuggingFace model like 'all-mpnet-base-v2'"
+                )
+            device = self.embedding_config.get("device")
+            return LocalEmbeddingFunction(model_name=model_name, device=device)
         
         else:
             # Use ChromaDB's default embedding function (all-MiniLM-L6-v2)
@@ -329,6 +377,12 @@ def create_chroma_client(config_path: Optional[str] = None) -> ChromaClient:
         "embedding_config": {}
     }
     
+    # If no config_path provided, try default location
+    if config_path is None:
+        default_config_path = Path.home() / ".config" / "zotero-mcp" / "config.json"
+        if default_config_path.exists():
+            config_path = str(default_config_path)
+    
     # Load configuration from file if it exists
     if config_path and os.path.exists(config_path):
         try:
@@ -361,6 +415,16 @@ def create_chroma_client(config_path: Optional[str] = None) -> ChromaClient:
                 "api_key": gemini_api_key,
                 "model_name": gemini_model
             }
+    
+    elif config["embedding_model"] == "local":
+        local_model = os.getenv("ZOTERO_LOCAL_EMBEDDING_MODEL")
+        local_device = os.getenv("ZOTERO_LOCAL_EMBEDDING_DEVICE")
+        if local_model:
+            config["embedding_config"] = {
+                "model_name": local_model
+            }
+            if local_device:
+                config["embedding_config"]["device"] = local_device
     
     return ChromaClient(
         collection_name=config["collection_name"],

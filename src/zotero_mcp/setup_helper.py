@@ -142,15 +142,16 @@ def setup_semantic_search(existing_semantic_config: dict = None, semantic_config
     
     # Choose embedding model
     print("\nAvailable embedding models:")
-    print("1. Default (all-MiniLM-L6-v2) - Free, runs locally")
-    print("2. OpenAI - Better quality, requires API key")
-    print("3. Gemini - Better quality, requires API key")
+    print("1. Default (all-MiniLM-L6-v2) - Built-in ChromaDB, fast, free")
+    print("2. Local Custom - Use ANY HuggingFace model locally (better quality)")
+    print("3. OpenAI - Cloud API, requires API key")
+    print("4. Gemini - Cloud API, requires API key")
     
     while True:
-        choice = input("\nChoose embedding model (1-3): ").strip()
-        if choice in ["1", "2", "3"]:
+        choice = input("\nChoose embedding model (1-4): ").strip()
+        if choice in ["1", "2", "3", "4"]:
             break
-        print("Please enter 1, 2, or 3")
+        print("Please enter 1, 2, 3, or 4")
     
     config = {}
     
@@ -159,6 +160,34 @@ def setup_semantic_search(existing_semantic_config: dict = None, semantic_config
         print("Using default embedding model (all-MiniLM-L6-v2)")
     
     elif choice == "2":
+        config["embedding_model"] = "local"
+        
+        print("\n=== Local Custom Embedding Model ===")
+        print("Use this to run any HuggingFace sentence-transformers model locally.")
+        print("Popular choices:")
+        print("  - all-mpnet-base-v2 (768 dims, good balance)")
+        print("  - multi-qa-mpnet-base-dot-v1 (optimized for Q&A)")
+        print("  - sentence-transformers/all-MiniLM-L12-v2 (larger, better quality)")
+        print("  - allenai-specter (for scientific papers)")
+        print()
+        
+        model_name = input("Enter HuggingFace model name (required): ").strip()
+        if not model_name:
+            print("Error: Model name is required for local embeddings")
+            return {}
+        
+        config["embedding_config"] = {"model_name": model_name}
+        
+        # Optional device selection
+        print("\nDevice selection (cpu/cuda):")
+        print("Press Enter to auto-detect")
+        device = input("Device: ").strip().lower()
+        if device in ["cpu", "cuda"]:
+            config["embedding_config"]["device"] = device
+        
+        print(f"Using local model: {model_name}")
+    
+    elif choice == "3":
         config["embedding_model"] = "openai"
         
         # Choose OpenAI model
@@ -184,7 +213,7 @@ def setup_semantic_search(existing_semantic_config: dict = None, semantic_config
         else:
             print("Warning: No API key provided. Set OPENAI_API_KEY environment variable.")
     
-    elif choice == "3":
+    elif choice == "4":
         config["embedding_model"] = "gemini"
         
         # Choose Gemini model
