@@ -192,8 +192,13 @@ class ChromaClient:
                     if existing_name != new_name:
                         # Log to stderr instead of letting ChromaDB print to stdout
                         sys.stderr.write(f"ChromaDB: Collection exists with different embedding function: {existing_name} vs {new_name}\n")
-                        # Use the existing collection's embedding function to avoid conflicts
-                        self.embedding_function = existing_ef
+                        # For local models, we want to use the new embedding function, not the existing one
+                        if self.embedding_model == "local":
+                            sys.stderr.write(f"ChromaDB: Using new local embedding function: {new_name}\n")
+                            # Keep the new embedding function for local models
+                        else:
+                            # Use the existing collection's embedding function to avoid conflicts
+                            self.embedding_function = existing_ef
                 
             except Exception:
                 # Collection doesn't exist, create it
