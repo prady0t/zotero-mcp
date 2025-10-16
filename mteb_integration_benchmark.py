@@ -3,6 +3,60 @@
 MTEB-Style Integration Benchmark for Local Embedding Models
 Comprehensive benchmark following MTEB leaderboard methodology for retrieval tasks.
 Tests local models against real academic papers with intensive evaluation.
+
+MODES:
+------
+1. TITLE + ABSTRACT Mode (default)
+   - Embeddings: title + abstract of each paper
+   - Queries: based on title, abstract, category, author, year
+   - Documents: ~100-200 papers
+   - Usage: python mteb_integration_benchmark.py
+   
+2. FULL TEXT Mode (new)
+   - Embeddings: complete full text split into chunks
+   - Downloads: actual PDF files from arXiv
+   - Text Extraction: uses PyPDF2 or pdfplumber
+   - Chunking: intelligent sentence-based chunking (512 char chunks)
+   - Queries: extracted from chunk content
+   - Documents: thousands of chunks from papers
+   - Usage: python mteb_integration_benchmark.py --full-text
+
+INSTALLATION REQUIREMENTS:
+--------------------------
+For Full Text mode, install additional dependencies:
+  pip install PyPDF2 pdfplumber
+
+EXAMPLES:
+---------
+# Run standard benchmark with title+abstract
+python mteb_integration_benchmark.py
+
+# Run full-text benchmark with custom model
+python mteb_integration_benchmark.py --full-text --model "Qwen/Qwen3-Embedding-0.6B"
+
+# Run with custom dataset size
+python mteb_integration_benchmark.py --full-text --dataset-size 50 --test-queries 25
+
+# Specify custom cache directory
+python mteb_integration_benchmark.py --full-text --cache-dir ~/.cache/zotero_benchmark
+
+PERFORMANCE NOTES:
+------------------
+- Full-text mode downloads actual PDFs (~5-20 MB per paper)
+- PDF extraction takes additional time (5-30 seconds per paper)
+- More chunks = more embeddings to generate (1000s vs 100s)
+- Results are cached to avoid re-downloading
+- Full-text provides more realistic evaluation of embedding quality
+
+METRICS:
+--------
+- Precision@k: exact chunk retrieval accuracy at top-k
+- Recall@k: chunk retrieval coverage at top-k  
+- NDCG@k: ranking quality considering position
+- MRR: mean reciprocal rank of first relevant result
+- MAP: mean average precision across all queries
+- Embedding time: time to generate all embeddings
+- Search time: time to perform retrieval across all queries
 """
 
 import sys
@@ -11,7 +65,8 @@ import json
 import requests
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
+from collections import defaultdict
 import numpy as np
 from dataclasses import dataclass
 import tempfile
@@ -45,6 +100,77 @@ class MTEBResult:
     total_documents: int
     total_queries: int
     success_rate: float
+    use_full_text: bool = False
+
+
+class TextChunker:
+    """Split documents into meaningful chunks for embeddings."""
+    
+    def __init__(self, chunk_size: int = 512, overlap: int = 50):
+        """
+        Initialize text chunker.
+        
+        Args:
+            chunk_size: Target characters per chunk
+            overlap: Character overlap between chunks
+        """
+        self.chunk_size = chunk_size
+        self.overlap = overlap
+    
+    def chunk_text(self, text: str, source_id: str = "") -> List[Dict[str, str]]:
+        """
+        Split text into overlapping chunks.
+        
+        Args:
+            text: Text to chunk
+            source_id: Source document ID
+            
+        Returns:
+            List of chunk dictionaries with text and metadata
+        """
+        if not text or len(text.strip()) == 0:
+            return []
+        
+        # Split by sentences first
+        sentences = text.replace('\n', ' ').split('. ')
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            sentence_length = len(sentence) + 2  # +2 for '. '
+            
+            # If adding this sentence would exceed chunk_size, save current chunk
+            if current_length + sentence_length > self.chunk_size and current_chunk:
+                chunk_text = '. '.join(current_chunk) + '.'
+                chunks.append({
+                    'text': chunk_text,
+                    'source': source_id,
+                    'char_count': len(chunk_text)
+                })
+                
+                # Keep last sentence for overlap
+                current_chunk = [sentence]
+                current_length = sentence_length
+            else:
+                current_chunk.append(sentence)
+                current_length += sentence_length
+        
+        # Add final chunk
+        if current_chunk:
+            chunk_text = '. '.join(current_chunk) + '.'
+            chunks.append({
+                'text': chunk_text,
+                'source': source_id,
+                'char_count': len(chunk_text)
+            })
+        
+        return chunks
+
 
 class AcademicPaperDataset:
     """Download and manage real academic paper datasets for benchmarking."""
@@ -52,21 +178,90 @@ class AcademicPaperDataset:
     def __init__(self, cache_dir: str = None):
         self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "mteb_benchmark"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.text_chunker = TextChunker()
     
-    def get_arxiv_papers(self, categories: List[str] = None, max_papers: int = 200) -> List[Dict]:
+    def download_arxiv_pdf(self, arxiv_url: str) -> Optional[str]:
+        """
+        Download full text PDF from arXiv.
+        
+        Args:
+            arxiv_url: arXiv paper URL or ID
+            
+        Returns:
+            Path to downloaded PDF or None if failed
+        """
+        try:
+            # Extract arxiv ID
+            if 'arxiv.org' in arxiv_url:
+                arxiv_id = arxiv_url.split('/abs/')[-1]
+            else:
+                arxiv_id = arxiv_url
+            
+            # Create PDF URL
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+            
+            # Download PDF
+            response = requests.get(pdf_url, timeout=15)
+            response.raise_for_status()
+            
+            # Save to cache
+            pdf_path = self.cache_dir / f"arxiv_{arxiv_id.replace('/', '_')}.pdf"
+            with open(pdf_path, 'wb') as f:
+                f.write(response.content)
+            
+            return str(pdf_path)
+        except Exception as e:
+            return None
+    
+    def extract_text_from_pdf(self, pdf_path: str) -> Optional[str]:
+        """
+        Extract text from PDF using PyPDF or similar.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Extracted text or None if failed
+        """
+        try:
+            import PyPDF2
+            
+            text = []
+            with open(pdf_path, 'rb') as f:
+                pdf_reader = PyPDF2.PdfReader(f)
+                for page in pdf_reader.pages:
+                    text.append(page.extract_text())
+            
+            return ' '.join(text)
+        except ImportError:
+            # Fallback: try with pdfplumber
+            try:
+                import pdfplumber
+                text = []
+                with pdfplumber.open(pdf_path) as pdf:
+                    for page in pdf.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text.append(page_text)
+                return ' '.join(text)
+            except ImportError:
+                print("⚠️  No PDF extraction library available (install PyPDF2 or pdfplumber)")
+                return None
+    
+    def get_arxiv_papers(self, categories: List[str] = None, max_papers: int = 200, use_full_text: bool = False) -> List[Dict]:
         """Download real papers from arXiv for benchmarking."""
         if categories is None:
             categories = ['cs.AI', 'cs.CL', 'cs.LG', 'cs.CV', 'cs.IR', 'cs.NE', 'stat.ML']
         
         papers = []
         for category in categories:
-            papers.extend(self._fetch_arxiv_category(category, max_papers // len(categories)))
+            papers.extend(self._fetch_arxiv_category(category, max_papers // len(categories), use_full_text))
         
         return papers[:max_papers]
     
-    def _fetch_arxiv_category(self, category: str, max_papers: int) -> List[Dict]:
+    def _fetch_arxiv_category(self, category: str, max_papers: int, use_full_text: bool = False) -> List[Dict]:
         """Fetch real papers from arXiv API."""
-        cache_file = self.cache_dir / f"arxiv_{category}_{max_papers}.json"
+        cache_file = self.cache_dir / f"arxiv_{category}_{max_papers}_fulltext_{use_full_text}.json"
         
         if cache_file.exists():
             with open(cache_file) as f:
@@ -75,14 +270,14 @@ class AcademicPaperDataset:
         print(f"📡 Fetching real papers from arXiv category: {category}")
         
         # Use arXiv API to get real papers
-        papers = self._fetch_from_arxiv_api(category, max_papers)
+        papers = self._fetch_from_arxiv_api(category, max_papers, use_full_text)
         
         with open(cache_file, 'w') as f:
             json.dump(papers, f, indent=2)
         
         return papers
     
-    def _fetch_from_arxiv_api(self, category: str, max_papers: int) -> List[Dict]:
+    def _fetch_from_arxiv_api(self, category: str, max_papers: int, use_full_text: bool = False) -> List[Dict]:
         """Fetch papers from arXiv API."""
         try:
             # arXiv API endpoint
@@ -98,16 +293,16 @@ class AcademicPaperDataset:
             response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
             
-            # Parse XML response (simplified)
-            papers = self._parse_arxiv_xml(response.text)
+            # Parse XML response
+            papers = self._parse_arxiv_xml(response.text, use_full_text)
             return papers[:max_papers]
             
         except Exception as e:
             print(f"⚠️  Error fetching from arXiv API: {e}")
             print("📝 Falling back to synthetic papers...")
-            return self._generate_synthetic_papers(category, max_papers)
+            return self._generate_synthetic_papers(category, max_papers, use_full_text)
     
-    def _parse_arxiv_xml(self, xml_content: str) -> List[Dict]:
+    def _parse_arxiv_xml(self, xml_content: str, use_full_text: bool = False) -> List[Dict]:
         """Parse arXiv XML response."""
         import xml.etree.ElementTree as ET
         
@@ -129,20 +324,35 @@ class AcademicPaperDataset:
                 published = entry.find('{http://www.w3.org/2005/Atom}published').text.strip()
                 year = published.split('-')[0]
                 
-                papers.append({
+                arxiv_id = entry.find('{http://www.w3.org/2005/Atom}id').text.strip()
+                
+                paper = {
                     "title": title,
                     "abstract": summary,
                     "authors": authors,
                     "year": int(year),
                     "category": "arXiv",
-                    "url": entry.find('{http://www.w3.org/2005/Atom}id').text.strip()
-                })
+                    "url": arxiv_id,
+                    "arxiv_id": arxiv_id.split('/abs/')[-1]
+                }
+                
+                # Download and extract full text if requested
+                if use_full_text:
+                    print(f"   Downloading full text for: {title[:50]}...")
+                    pdf_path = self.download_arxiv_pdf(arxiv_id)
+                    if pdf_path:
+                        full_text = self.extract_text_from_pdf(pdf_path)
+                        if full_text:
+                            paper["full_text"] = full_text
+                            paper["full_text_chunks"] = self.text_chunker.chunk_text(full_text, paper["arxiv_id"])
+                
+                papers.append(paper)
             except Exception as e:
                 continue
         
         return papers
     
-    def _generate_synthetic_papers(self, category: str, count: int) -> List[Dict]:
+    def _generate_synthetic_papers(self, category: str, count: int, use_full_text: bool = False) -> List[Dict]:
         """Generate high-quality synthetic academic papers for testing."""
         base_papers = {
             'cs.AI': [
@@ -246,7 +456,6 @@ class AcademicPaperDataset:
         }
         
         papers = base_papers.get(category, [])
-        # Duplicate and modify papers to reach desired count
         result = []
         for i in range(count):
             if i < len(papers):
@@ -268,18 +477,35 @@ class MTEBRetrievalBenchmark:
         self.dataset_manager = AcademicPaperDataset(cache_dir)
         self.results = []
     
-    def create_retrieval_queries(self, papers: List[Dict]) -> List[Dict]:
-        """Create comprehensive retrieval queries from paper content."""
+    def create_retrieval_queries(self, papers: List[Dict], max_queries: Optional[int] = None) -> List[Dict]:
+        """Create comprehensive retrieval queries from paper content with graded relevance."""
         queries = []
+        if max_queries is None or max_queries > len(papers):
+            max_queries = len(papers)
+        
+        # Pre-compute attribute lookups across full candidate pool
+        category_to_indices: Dict[str, List[int]] = defaultdict(list)
+        year_to_indices: Dict[int, List[int]] = defaultdict(list)
+        author_to_indices: Dict[str, List[int]] = defaultdict(list)
+        
+        for idx, paper in enumerate(papers):
+            category = paper.get("category")
+            if category:
+                category_to_indices[category.lower()].append(idx)
+            year = paper.get("year")
+            if isinstance(year, int):
+                year_to_indices[year].append(idx)
+            for author in paper.get("authors", []):
+                if author:
+                    author_to_indices[author].append(idx)
         
         # Create queries based on paper content
-        for i, paper in enumerate(papers):
+        for i, paper in enumerate(papers[:max_queries]):
             # Title-based query
             queries.append({
                 "query": paper["title"],
-                "expected_paper_id": i,
                 "query_type": "title_match",
-                "relevance_score": 1.0
+                "relevant_documents": {i: 1.0}
             })
             
             # Abstract-based query (first sentence)
@@ -287,37 +513,85 @@ class MTEBRetrievalBenchmark:
             if len(abstract_sentences) > 1:
                 queries.append({
                     "query": abstract_sentences[0].strip(),
-                    "expected_paper_id": i,
                     "query_type": "abstract_match",
-                    "relevance_score": 0.8
+                    "relevant_documents": {i: 0.8}
                 })
             
             # Category-based query
-            queries.append({
-                "query": f"papers about {paper['category'].lower()}",
-                "expected_paper_id": i,
-                "query_type": "category_match",
-                "relevance_score": 0.6
-            })
+            category = paper.get("category")
+            if category:
+                category_key = category.lower()
+                relevant_indices = category_to_indices.get(category_key, [])
+                if relevant_indices:
+                    queries.append({
+                        "query": f"papers about {category_key}",
+                        "query_type": "category_match",
+                        "relevant_documents": {doc_idx: 0.6 for doc_idx in relevant_indices}
+                    })
             
             # Author-based query
             if paper.get("authors") and len(paper["authors"]) > 0:
-                queries.append({
-                    "query": f"papers by {paper['authors'][0]}",
-                    "expected_paper_id": i,
-                    "query_type": "author_match",
-                    "relevance_score": 0.7
-                })
+                primary_author = paper["authors"][0]
+                relevant_indices = author_to_indices.get(primary_author, [])
+                if relevant_indices:
+                    queries.append({
+                        "query": f"papers by {primary_author}",
+                        "query_type": "author_match",
+                        "relevant_documents": {doc_idx: 0.7 for doc_idx in relevant_indices}
+                    })
             
             # Year-based query
-            queries.append({
-                "query": f"papers from {paper['year']}",
-                "expected_paper_id": i,
-                "query_type": "year_match",
-                "relevance_score": 0.5
-            })
+            year = paper.get("year")
+            if isinstance(year, int):
+                relevant_indices = year_to_indices.get(year, [])
+                if relevant_indices:
+                    queries.append({
+                        "query": f"papers from {year}",
+                        "query_type": "year_match",
+                        "relevant_documents": {doc_idx: 0.5 for doc_idx in relevant_indices}
+                    })
         
         return queries
+    
+    def create_full_text_retrieval_queries(self, papers: List[Dict]) -> Tuple[List[Dict], Dict]:
+        """Create retrieval queries from full text chunks."""
+        queries = []
+        chunk_index = 0
+        document_chunks = {}  # Map chunk index to paper index
+        
+        for paper_idx, paper in enumerate(papers):
+            if "full_text_chunks" not in paper:
+                continue
+            
+            chunks = paper["full_text_chunks"]
+            for chunk_idx, chunk in enumerate(chunks):
+                document_chunks[chunk_index] = paper_idx
+                chunk_index += 1
+                
+                # Extract key phrases from chunk for queries
+                text = chunk['text']
+                sentences = text.split('. ')
+                
+                # First sentence query
+                if sentences:
+                    queries.append({
+                        "query": sentences[0].strip(),
+                        "expected_chunk_id": chunk_index - 1,
+                        "expected_paper_id": paper_idx,
+                        "query_type": "chunk_content",
+                        "relevance_score": 0.9
+                    })
+                
+                # Title + chunk query (more specific)
+                queries.append({
+                    "query": f"{paper['title']} {sentences[0].strip() if sentences else ''}",
+                    "expected_chunk_id": chunk_index - 1,
+                    "expected_paper_id": paper_idx,
+                    "query_type": "title_chunk_match",
+                    "relevance_score": 0.8
+                })
+        
+        return queries, document_chunks
     
     def calculate_mteb_metrics(self, 
                             query_results: List[List[int]], 
@@ -495,15 +769,159 @@ class MTEBRetrievalBenchmark:
         
         return result
 
-def run_mteb_integration_benchmark(local_model_name: str = None):
+    def run_full_text_benchmark(self, 
+                               model_name: str, 
+                               embedding_function, 
+                               dataset_size: int = 100,
+                               test_queries: int = 50) -> MTEBResult:
+        """Run MTEB-style benchmark using full text of papers."""
+        print(f"\n🧪 Running MTEB-style benchmark (FULL TEXT mode) for {model_name}")
+        print("=" * 60)
+        
+        # 1. Load academic papers dataset with full text
+        print("📚 Loading academic papers dataset with full text...")
+        papers = self.dataset_manager.get_arxiv_papers(max_papers=dataset_size, use_full_text=True)
+        
+        # Filter papers that have full text chunks
+        papers_with_fulltext = [p for p in papers if "full_text_chunks" in p and p["full_text_chunks"]]
+        print(f"   Loaded {len(papers)} papers, {len(papers_with_fulltext)} with full text")
+        
+        if not papers_with_fulltext:
+            print("⚠️  No papers with full text available. Using fallback to title+abstract mode.")
+            return self.run_mteb_benchmark(model_name, embedding_function, dataset_size, test_queries)
+        
+        # 2. Create retrieval queries from full text chunks
+        print("🔍 Creating retrieval queries from full text chunks...")
+        queries, document_chunks = self.create_full_text_retrieval_queries(papers_with_fulltext[:test_queries])
+        print(f"   Created {len(queries)} queries from {len(document_chunks)} chunks")
+        
+        # 3. Generate embeddings for all chunks
+        print("⚡ Generating embeddings for document chunks...")
+        chunk_texts = []
+        chunk_to_paper = {}  # Map chunk index to paper index
+        
+        for paper_idx, paper in enumerate(papers_with_fulltext):
+            if "full_text_chunks" in paper:
+                for chunk in paper["full_text_chunks"]:
+                    chunk_to_paper[len(chunk_texts)] = paper_idx
+                    chunk_texts.append(chunk['text'])
+        
+        start_time = time.time()
+        doc_embeddings = embedding_function(chunk_texts)
+        embedding_time = time.time() - start_time
+        
+        print(f"   Generated {len(doc_embeddings)} chunk embeddings in {embedding_time:.3f}s")
+        print(f"   Embedding dimension: {len(doc_embeddings[0])}")
+        print(f"   Total text processed: {sum(len(ct) for ct in chunk_texts)} characters")
+        
+        # 4. Generate embeddings for queries
+        print("🔍 Generating query embeddings...")
+        query_texts = [query["query"] for query in queries]
+        
+        start_time = time.time()
+        query_embeddings = embedding_function(query_texts)
+        query_embedding_time = time.time() - start_time
+        
+        print(f"   Generated {len(query_embeddings)} query embeddings in {query_embedding_time:.3f}s")
+        
+        # 5. Perform retrieval
+        print("🔎 Performing retrieval on chunks...")
+        start_time = time.time()
+        
+        query_results = []
+        expected_results = []
+        relevance_scores = []
+        
+        for i, query_embedding in enumerate(query_embeddings):
+            # Calculate similarities with all chunks
+            similarities = []
+            for doc_embedding in doc_embeddings:
+                similarity = np.dot(query_embedding, doc_embedding) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding)
+                )
+                similarities.append(similarity)
+            
+            # Get ranked results (chunk indices)
+            ranked_indices = np.argsort(similarities)[::-1]  # Descending order
+            query_results.append(ranked_indices.tolist())
+            
+            # Map chunk index back to paper index
+            expected_chunk = queries[i].get("expected_chunk_id", 0)
+            expected_results.append(expected_chunk)
+            relevance_scores.append(queries[i]["relevance_score"])
+        
+        search_time = time.time() - start_time
+        print(f"   Completed retrieval in {search_time:.3f}s")
+        
+        # 6. Calculate MTEB metrics
+        print("📊 Calculating MTEB metrics...")
+        metrics = self.calculate_mteb_metrics(query_results, expected_results, relevance_scores)
+        
+        # 7. Create result
+        result = MTEBResult(
+            model_name=model_name,
+            dataset_name="academic_papers_fulltext",
+            task_type="retrieval_fulltext",
+            accuracy=metrics.get('precision@1', 0.0),
+            precision=metrics.get('precision@5', 0.0),
+            recall=metrics.get('recall@5', 0.0),
+            f1_score=2 * (metrics.get('precision@5', 0.0) * metrics.get('recall@5', 0.0)) / 
+                     (metrics.get('precision@5', 0.0) + metrics.get('recall@5', 0.0)) if 
+                     (metrics.get('precision@5', 0.0) + metrics.get('recall@5', 0.0)) > 0 else 0.0,
+            mrr=metrics.get('mrr', 0.0),
+            ndcg=metrics.get('ndcg@10', 0.0),
+            embedding_time=embedding_time + query_embedding_time,
+            search_time=search_time,
+            total_documents=len(chunk_texts),
+            total_queries=len(queries),
+            success_rate=metrics.get('precision@5', 0.0),
+            use_full_text=True
+        )
+        
+        # 8. Display results
+        print(f"\n📈 MTEB Benchmark Results (FULL TEXT) for {model_name}:")
+        print(f"   Accuracy (P@1): {result.accuracy:.3f}")
+        print(f"   Precision@5: {result.precision:.3f}")
+        print(f"   Recall@5: {result.recall:.3f}")
+        print(f"   F1-Score: {result.f1_score:.3f}")
+        print(f"   MRR: {result.mrr:.3f}")
+        print(f"   NDCG@10: {result.ndcg:.3f}")
+        print(f"   MAP: {metrics.get('map', 0.0):.3f}")
+        print(f"   Embedding time: {result.embedding_time:.3f}s")
+        print(f"   Search time: {result.search_time:.3f}s")
+        print(f"   Document chunks: {result.total_documents}")
+        
+        # Display detailed metrics
+        print(f"\n📊 Detailed MTEB Metrics:")
+        for k in [1, 3, 5, 10, 20]:
+            if f'precision@{k}' in metrics:
+                print(f"   P@{k}: {metrics[f'precision@{k}']:.3f}")
+        for k in [1, 3, 5, 10, 20]:
+            if f'ndcg@{k}' in metrics:
+                print(f"   NDCG@{k}: {metrics[f'ndcg@{k}']:.3f}")
+        
+        return result
+
+
+def run_mteb_integration_benchmark(
+    local_model_name: str = None,
+    use_full_text: bool = False,
+    dataset_size: int = 100,
+    test_queries: int = 50,
+    cache_dir: Optional[str] = None,
+):
     """Run comprehensive MTEB-style integration benchmark."""
     print("🚀 MTEB-Style Integration Benchmark for Local Embedding Models")
     print("=" * 80)
     print("Following MTEB leaderboard methodology for retrieval tasks")
+    if use_full_text:
+        print("📄 Using FULL TEXT of papers for benchmark")
+    else:
+        print("📄 Using title + abstract of papers for benchmark")
     print("Testing with real academic papers and intensive evaluation")
     
     # Initialize benchmark
-    benchmark = MTEBRetrievalBenchmark()
+    benchmark = MTEBRetrievalBenchmark(cache_dir=cache_dir)
     results = []
     
     # Test 1: Default ChromaDB model
@@ -513,12 +931,21 @@ def run_mteb_integration_benchmark(local_model_name: str = None):
     
     try:
         default_ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
-        default_result = benchmark.run_mteb_benchmark(
-            model_name="Default ChromaDB (all-MiniLM-L6-v2)",
-            embedding_function=default_ef,
-            dataset_size=100,
-            test_queries=50
-        )
+        if use_full_text:
+            default_result = benchmark.run_full_text_benchmark(
+                model_name="Default ChromaDB (all-MiniLM-L6-v2)",
+                embedding_function=default_ef,
+                dataset_size=dataset_size,
+                test_queries=test_queries
+            )
+        else:
+            default_result = benchmark.run_mteb_benchmark(
+                model_name="Default ChromaDB (all-MiniLM-L6-v2)",
+                embedding_function=default_ef,
+                dataset_size=dataset_size,
+                test_queries=test_queries
+            )
+        default_result.use_full_text = use_full_text
         results.append(default_result)
     except Exception as e:
         print(f"❌ Error testing default model: {e}")
@@ -527,6 +954,7 @@ def run_mteb_integration_benchmark(local_model_name: str = None):
     if local_model_name:
         model_name = local_model_name
     else:
+        model_name = "google/embeddinggemma-300m-qat-q8_0-unquantized"
         model_name = "Qwen/Qwen3-Embedding-0.6B"
     
     print(f"\n{'='*80}")
@@ -535,15 +963,26 @@ def run_mteb_integration_benchmark(local_model_name: str = None):
     
     try:
         local_ef = LocalEmbeddingFunction(model_name=model_name)
-        local_result = benchmark.run_mteb_benchmark(
-            model_name=model_name,
-            embedding_function=local_ef,
-            dataset_size=100,
-            test_queries=50
-        )
+        if use_full_text:
+            local_result = benchmark.run_full_text_benchmark(
+                model_name=model_name,
+                embedding_function=local_ef,
+                dataset_size=dataset_size,
+                test_queries=test_queries
+            )
+        else:
+            local_result = benchmark.run_mteb_benchmark(
+                model_name=model_name,
+                embedding_function=local_ef,
+                dataset_size=dataset_size,
+                test_queries=test_queries
+            )
+        local_result.use_full_text = use_full_text
         results.append(local_result)
     except Exception as e:
         print(f"❌ Error testing {model_name} model: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Compare results
     if len(results) == 2:
@@ -632,10 +1071,21 @@ def main():
         type=str, 
         help="Cache directory for downloaded papers"
     )
+    parser.add_argument(
+        "--full-text", 
+        action="store_true", 
+        help="Use full text of papers for embedding and retrieval"
+    )
     
     args = parser.parse_args()
     
-    run_mteb_integration_benchmark(args.model)
+    run_mteb_integration_benchmark(
+        local_model_name=args.model,
+        use_full_text=args.full_text,
+        dataset_size=args.dataset_size,
+        test_queries=args.test_queries,
+        cache_dir=args.cache_dir,
+    )
 
 if __name__ == "__main__":
     try:

@@ -36,3 +36,6 @@ Thumbs.db
 # Environment variables
 .env
 .env.local
+# pixi environments
+.pixi/*
+!.pixi/config.toml

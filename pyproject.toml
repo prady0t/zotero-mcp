@@ -10,7 +10,7 @@ authors = [
 ]
 description = "A Model Context Protocol server for Zotero"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -50,3 +50,20 @@ target-version = ["py310"]
 
 [tool.isort]
 profile = "black"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.dependencies]
+python = ">=3.10,<3.14"
+
+[tool.pixi.pypi-dependencies]
+zotero-mcp = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
+zotero-mcp = "python -m zotero_mcp.cli"
