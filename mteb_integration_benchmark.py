@@ -505,7 +505,7 @@ class MTEBRetrievalBenchmark:
             queries.append({
                 "query": paper["title"],
                 "query_type": "title_match",
-                "relevant_documents": {i: 1.0}
+                "relevant_items": {i: 1.0}
             })
             
             # Abstract-based query (first sentence)
@@ -514,7 +514,7 @@ class MTEBRetrievalBenchmark:
                 queries.append({
                     "query": abstract_sentences[0].strip(),
                     "query_type": "abstract_match",
-                    "relevant_documents": {i: 0.8}
+                    "relevant_items": {i: 0.8}
                 })
             
             # Category-based query
@@ -526,7 +526,7 @@ class MTEBRetrievalBenchmark:
                     queries.append({
                         "query": f"papers about {category_key}",
                         "query_type": "category_match",
-                        "relevant_documents": {doc_idx: 0.6 for doc_idx in relevant_indices}
+                        "relevant_items": {doc_idx: 0.6 for doc_idx in relevant_indices}
                     })
             
             # Author-based query
@@ -537,7 +537,7 @@ class MTEBRetrievalBenchmark:
                     queries.append({
                         "query": f"papers by {primary_author}",
                         "query_type": "author_match",
-                        "relevant_documents": {doc_idx: 0.7 for doc_idx in relevant_indices}
+                        "relevant_items": {doc_idx: 0.7 for doc_idx in relevant_indices}
                     })
             
             # Year-based query
@@ -548,24 +548,23 @@ class MTEBRetrievalBenchmark:
                     queries.append({
                         "query": f"papers from {year}",
                         "query_type": "year_match",
-                        "relevant_documents": {doc_idx: 0.5 for doc_idx in relevant_indices}
+                        "relevant_items": {doc_idx: 0.5 for doc_idx in relevant_indices}
                     })
         
         return queries
     
-    def create_full_text_retrieval_queries(self, papers: List[Dict]) -> Tuple[List[Dict], Dict]:
+    def create_full_text_retrieval_queries(self, papers: List[Dict]) -> List[Dict]:
         """Create retrieval queries from full text chunks."""
         queries = []
         chunk_index = 0
-        document_chunks = {}  # Map chunk index to paper index
         
         for paper_idx, paper in enumerate(papers):
             if "full_text_chunks" not in paper:
                 continue
             
             chunks = paper["full_text_chunks"]
-            for chunk_idx, chunk in enumerate(chunks):
-                document_chunks[chunk_index] = paper_idx
+            for chunk in chunks:
+                current_chunk_id = chunk_index
                 chunk_index += 1
                 
                 # Extract key phrases from chunk for queries
@@ -576,83 +575,96 @@ class MTEBRetrievalBenchmark:
                 if sentences:
                     queries.append({
                         "query": sentences[0].strip(),
-                        "expected_chunk_id": chunk_index - 1,
-                        "expected_paper_id": paper_idx,
                         "query_type": "chunk_content",
-                        "relevance_score": 0.9
+                        "relevant_items": {current_chunk_id: 0.9},
+                        "paper_index": paper_idx
                     })
                 
                 # Title + chunk query (more specific)
                 queries.append({
                     "query": f"{paper['title']} {sentences[0].strip() if sentences else ''}",
-                    "expected_chunk_id": chunk_index - 1,
-                    "expected_paper_id": paper_idx,
                     "query_type": "title_chunk_match",
-                    "relevance_score": 0.8
+                    "relevant_items": {current_chunk_id: 0.8},
+                    "paper_index": paper_idx
                 })
         
-        return queries, document_chunks
+        return queries
     
-    def calculate_mteb_metrics(self, 
-                            query_results: List[List[int]], 
-                            expected_results: List[int],
-                            relevance_scores: List[float],
-                            k_values: List[int] = [1, 3, 5, 10, 20]) -> Dict[str, float]:
-        """Calculate MTEB-style retrieval metrics."""
-        metrics = {}
+    def calculate_mteb_metrics(
+        self,
+        query_results: List[List[int]],
+        relevant_sets: List[Dict[int, float]],
+        k_values: List[int] = [1, 3, 5, 10, 20]
+    ) -> Dict[str, float]:
+        """Calculate MTEB-style retrieval metrics with graded relevance."""
+        if not query_results or not relevant_sets:
+            return {}
         
-        for k in k_values:
-            precision_at_k = []
-            recall_at_k = []
-            ndcg_at_k = []
-            
-            for i, (results, expected, relevance) in enumerate(zip(query_results, expected_results, relevance_scores)):
-                # Get top-k results
-                top_k = results[:k]
-                
-                # Precision@K
-                if expected in top_k:
-                    precision_at_k.append(1.0)
-                else:
-                    precision_at_k.append(0.0)
-                
-                # Recall@K
-                if expected in top_k:
-                    recall_at_k.append(1.0)
-                else:
-                    recall_at_k.append(0.0)
-                
-                # NDCG@K
-                if expected in top_k:
-                    rank = top_k.index(expected) + 1
-                    ndcg = relevance / np.log2(rank + 1)
-                    ndcg_at_k.append(ndcg)
-                else:
-                    ndcg_at_k.append(0.0)
-            
-            metrics[f'precision@{k}'] = np.mean(precision_at_k)
-            metrics[f'recall@{k}'] = np.mean(recall_at_k)
-            metrics[f'ndcg@{k}'] = np.mean(ndcg_at_k)
+        metrics: Dict[str, float] = {}
+        max_k = max(k_values)
         
-        # Calculate MRR (Mean Reciprocal Rank)
-        mrr_scores = []
-        for results, expected in zip(query_results, expected_results):
-            if expected in results:
-                rank = results.index(expected) + 1
-                mrr_scores.append(1.0 / rank)
+        precision_scores: Dict[int, List[float]] = {k: [] for k in k_values}
+        recall_scores: Dict[int, List[float]] = {k: [] for k in k_values}
+        ndcg_scores: Dict[int, List[float]] = {k: [] for k in k_values}
+        
+        map_scores: List[float] = []
+        mrr_scores: List[float] = []
+        
+        for results, relevants in zip(query_results, relevant_sets):
+            relevant_items = {doc_id: score for doc_id, score in relevants.items() if score > 0}
+            if not relevant_items:
+                for k in k_values:
+                    precision_scores[k].append(0.0)
+                    recall_scores[k].append(0.0)
+                    ndcg_scores[k].append(0.0)
+                map_scores.append(0.0)
+                mrr_scores.append(0.0)
+                continue
+            
+            relevant_count = len(relevant_items)
+            top_results = results[:max_k]
+            ranked_gains = [relevant_items.get(doc_id, 0.0) for doc_id in top_results]
+            ideal_gains_sorted = sorted(relevant_items.values(), reverse=True)
+            
+            for k in k_values:
+                top_k_gains = ranked_gains[:k]
+                hits = sum(1 for gain in top_k_gains if gain > 0)
+                precision_scores[k].append(hits / k)
+                recall_scores[k].append(hits / relevant_count if relevant_count else 0.0)
+                
+                dcg = sum(gain / np.log2(idx + 2) for idx, gain in enumerate(top_k_gains))
+                ideal_k_gains = ideal_gains_sorted[:k]
+                idcg = sum(gain / np.log2(idx + 2) for idx, gain in enumerate(ideal_k_gains))
+                ndcg_scores[k].append((dcg / idcg) if idcg > 0 else 0.0)
+            
+            # Mean Average Precision
+            hits_so_far = 0
+            precision_sum = 0.0
+            first_relevant_rank: Optional[int] = None
+            for rank, doc_id in enumerate(results, start=1):
+                if doc_id in relevant_items:
+                    hits_so_far += 1
+                    precision_sum += hits_so_far / rank
+                    if first_relevant_rank is None:
+                        first_relevant_rank = rank
+                if hits_so_far == relevant_count:
+                    # All relevant items have been seen; remaining ranks can't improve MAP/MRR
+                    break
+            
+            average_precision = (precision_sum / relevant_count) if relevant_count else 0.0
+            map_scores.append(average_precision)
+            if first_relevant_rank is not None:
+                mrr_scores.append(1.0 / first_relevant_rank)
             else:
                 mrr_scores.append(0.0)
-        metrics['mrr'] = np.mean(mrr_scores)
         
-        # Calculate MAP (Mean Average Precision)
-        map_scores = []
-        for results, expected in zip(query_results, expected_results):
-            if expected in results:
-                rank = results.index(expected) + 1
-                map_scores.append(1.0 / rank)
-            else:
-                map_scores.append(0.0)
-        metrics['map'] = np.mean(map_scores)
+        for k in k_values:
+            metrics[f'precision@{k}'] = float(np.mean(precision_scores[k])) if precision_scores[k] else 0.0
+            metrics[f'recall@{k}'] = float(np.mean(recall_scores[k])) if recall_scores[k] else 0.0
+            metrics[f'ndcg@{k}'] = float(np.mean(ndcg_scores[k])) if ndcg_scores[k] else 0.0
+        
+        metrics['map'] = float(np.mean(map_scores)) if map_scores else 0.0
+        metrics['mrr'] = float(np.mean(mrr_scores)) if mrr_scores else 0.0
         
         return metrics
     
@@ -672,7 +684,8 @@ class MTEBRetrievalBenchmark:
         
         # 2. Create retrieval queries
         print("🔍 Creating retrieval queries...")
-        queries = self.create_retrieval_queries(papers[:test_queries])
+        queries = self.create_retrieval_queries(papers, max_queries=test_queries)
+        queries = [q for q in queries if q.get("relevant_items")]
         print(f"   Created {len(queries)} queries")
         
         # 3. Generate embeddings for documents
@@ -701,8 +714,7 @@ class MTEBRetrievalBenchmark:
         start_time = time.time()
         
         query_results = []
-        expected_results = []
-        relevance_scores = []
+        relevant_sets = [query["relevant_items"] for query in queries]
         
         for i, query_embedding in enumerate(query_embeddings):
             # Calculate similarities
@@ -716,15 +728,13 @@ class MTEBRetrievalBenchmark:
             # Get ranked results
             ranked_indices = np.argsort(similarities)[::-1]  # Descending order
             query_results.append(ranked_indices.tolist())
-            expected_results.append(queries[i]["expected_paper_id"])
-            relevance_scores.append(queries[i]["relevance_score"])
         
         search_time = time.time() - start_time
         print(f"   Completed retrieval in {search_time:.3f}s")
         
         # 6. Calculate MTEB metrics
         print("📊 Calculating MTEB metrics...")
-        metrics = self.calculate_mteb_metrics(query_results, expected_results, relevance_scores)
+        metrics = self.calculate_mteb_metrics(query_results, relevant_sets)
         
         # 7. Create result
         result = MTEBResult(
@@ -792,18 +802,17 @@ class MTEBRetrievalBenchmark:
         
         # 2. Create retrieval queries from full text chunks
         print("🔍 Creating retrieval queries from full text chunks...")
-        queries, document_chunks = self.create_full_text_retrieval_queries(papers_with_fulltext[:test_queries])
-        print(f"   Created {len(queries)} queries from {len(document_chunks)} chunks")
+        queries = self.create_full_text_retrieval_queries(papers_with_fulltext[:test_queries])
+        queries = [q for q in queries if q.get("relevant_items")]
+        covered_chunks = {idx for query in queries for idx in query["relevant_items"].keys()}
+        print(f"   Created {len(queries)} queries covering {len(covered_chunks)} chunks")
         
         # 3. Generate embeddings for all chunks
         print("⚡ Generating embeddings for document chunks...")
         chunk_texts = []
-        chunk_to_paper = {}  # Map chunk index to paper index
-        
         for paper_idx, paper in enumerate(papers_with_fulltext):
             if "full_text_chunks" in paper:
                 for chunk in paper["full_text_chunks"]:
-                    chunk_to_paper[len(chunk_texts)] = paper_idx
                     chunk_texts.append(chunk['text'])
         
         start_time = time.time()
@@ -829,8 +838,7 @@ class MTEBRetrievalBenchmark:
         start_time = time.time()
         
         query_results = []
-        expected_results = []
-        relevance_scores = []
+        relevant_sets = [query["relevant_items"] for query in queries]
         
         for i, query_embedding in enumerate(query_embeddings):
             # Calculate similarities with all chunks
@@ -844,18 +852,13 @@ class MTEBRetrievalBenchmark:
             # Get ranked results (chunk indices)
             ranked_indices = np.argsort(similarities)[::-1]  # Descending order
             query_results.append(ranked_indices.tolist())
-            
-            # Map chunk index back to paper index
-            expected_chunk = queries[i].get("expected_chunk_id", 0)
-            expected_results.append(expected_chunk)
-            relevance_scores.append(queries[i]["relevance_score"])
         
         search_time = time.time() - start_time
         print(f"   Completed retrieval in {search_time:.3f}s")
         
         # 6. Calculate MTEB metrics
         print("📊 Calculating MTEB metrics...")
-        metrics = self.calculate_mteb_metrics(query_results, expected_results, relevance_scores)
+        metrics = self.calculate_mteb_metrics(query_results, relevant_sets)
         
         # 7. Create result
         result = MTEBResult(
