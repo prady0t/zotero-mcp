@@ -1,0 +1,87 @@
+name: MTEB Benchmark
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run benchmark daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10, 3.11]
+        model: [
+          "Qwen/Qwen3-Embedding-0.6B",
+          "sentence-transformers/all-MiniLM-L6-v2",
+          "sentence-transformers/all-mpnet-base-v2"
+        ]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Cache MTEB benchmark data
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/mteb_benchmark
+        key: ${{ runner.os }}-mteb-${{ hashFiles('**/mteb_integration_benchmark.py') }}
+        restore-keys: |
+          ${{ runner.os }}-mteb-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install sentence-transformers torch
+    
+    - name: Run MTEB benchmark
+      run: |
+        python mteb_integration_benchmark.py \
+          --model "${{ matrix.model }}" \
+          --dataset-size 50 \
+          --test-queries 25 \
+          --cache-dir ~/.cache/mteb_benchmark
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: benchmark-results-${{ matrix.model }}-${{ matrix.python-version }}
+        path: |
+          ~/.cache/mteb_benchmark/
+        retention-days: 30
+    
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          // Read benchmark results and create comment
+          const results = "Benchmark completed for ${{ matrix.model }}";
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🚀 MTEB Benchmark Results\n\n${results}`
+          });
