@@ -482,9 +482,167 @@ class AcademicPaperDataset:
 class MTEBRetrievalBenchmark:
     """MTEB-style retrieval benchmark for embedding models."""
     
-    def __init__(self, cache_dir: str = None):
+    def __init__(self, cache_dir: str = None, analysis_config: Optional[Dict[str, Any]] = None):
         self.dataset_manager = AcademicPaperDataset(cache_dir)
         self.results = []
+        self.analysis_config = analysis_config or {}
+        self.analysis_records: List[Dict[str, Any]] = []
+    
+    @staticmethod
+    def _normalize_key(value: str) -> str:
+        """Normalize text keys for matching."""
+        return ' '.join(value.lower().split())
+    
+    def _build_external_queries(
+        self,
+        papers: List[Dict],
+        query_records: List[Dict],
+        limit: Optional[int] = None,
+        expand_to_chunks: bool = False,
+        paper_to_chunks: Optional[Dict[int, List[int]]] = None
+    ) -> List[Dict]:
+        """
+        Build query structures from an external query specification.
+        
+        Args:
+            papers: Dataset papers to search over.
+            query_records: Raw query specifications loaded from file.
+            limit: Optional maximum number of queries to return.
+            expand_to_chunks: If True, map relevant documents to all of their chunk indices.
+            paper_to_chunks: Mapping of paper index to list of chunk indices (required when expand_to_chunks).
+        
+        Returns:
+            A list of query dictionaries compatible with downstream evaluation.
+        """
+        if not query_records:
+            return []
+        
+        url_to_index = {}
+        title_to_index = {}
+        for idx, paper in enumerate(papers):
+            url = paper.get("url")
+            if url:
+                url_to_index[url.strip().lower()] = idx
+            title = paper.get("title")
+            if title:
+                title_to_index[self._normalize_key(title)] = idx
+        
+        queries = []
+        missing_entries = []
+        
+        for record in query_records:
+            query_text = record.get("query")
+            if not query_text:
+                continue
+            
+            relevant_items: Dict[int, float] = {}
+            for doc in record.get("relevant_documents", []):
+                score = float(doc.get("relevance", 1.0))
+                doc_index = None
+                
+                url = doc.get("url")
+                if url:
+                    doc_index = url_to_index.get(url.strip().lower())
+                
+                if doc_index is None:
+                    title = doc.get("title")
+                    if title:
+                        doc_index = title_to_index.get(self._normalize_key(title))
+                
+                if doc_index is None:
+                    missing_entries.append((record.get("id"), doc))
+                    continue
+                
+                if expand_to_chunks:
+                    if paper_to_chunks is None:
+                        raise ValueError("paper_to_chunks is required when expand_to_chunks is True.")
+                    for chunk_idx in paper_to_chunks.get(doc_index, []):
+                        relevant_items[chunk_idx] = score
+                else:
+                    relevant_items[doc_index] = score
+            
+            # Allow negative control queries with no relevant documents but warn once.
+            if not relevant_items:
+                missing_entries.append((record.get("id"), {"reason": "no matched documents"}))
+            
+            queries.append({
+                "id": record.get("id"),
+                "query": query_text,
+                "relevant_items": relevant_items
+            })
+            
+            if limit is not None and len(queries) >= limit:
+                break
+        
+        if missing_entries:
+            print("⚠️  Some query targets could not be matched:")
+            for qid, doc in missing_entries[:5]:
+                print(f"   - Query {qid}: missing {doc.get('title') or doc.get('url') or doc.get('reason')}")
+            if len(missing_entries) > 5:
+                print(f"   ... {len(missing_entries) - 5} more missing entries.")
+        
+        return queries
+    
+    def _collect_analysis(
+        self,
+        model_name: str,
+        mode: str,
+        queries: List[Dict],
+        query_results: List[List[int]],
+        relevant_sets: List[Dict[int, float]],
+        documents_metadata: List[Dict[str, Any]]
+    ):
+        """Collect per-query analysis data when enabled."""
+        top_k = max(0, int(self.analysis_config.get("top_k", 0)))
+        if top_k <= 0 or not documents_metadata:
+            return
+        
+        for query, rankings, relevants in zip(queries, query_results, relevant_sets):
+            entry: Dict[str, Any] = {
+                "model": model_name,
+                "mode": mode,
+                "query_id": query.get("id"),
+                "query": query.get("query"),
+                "relevant_items": [
+                    {
+                        **documents_metadata[doc_idx],
+                        "document_index": doc_idx,
+                        "relevance": float(score)
+                    }
+                    for doc_idx, score in relevants.items()
+                    if doc_idx < len(documents_metadata)
+                ],
+                "top_documents": []
+            }
+            
+            for rank, doc_idx in enumerate(rankings[:top_k], start=1):
+                if doc_idx >= len(documents_metadata):
+                    continue
+                doc_meta = {
+                    **documents_metadata[doc_idx],
+                    "document_index": doc_idx,
+                    "rank": rank,
+                    "is_relevant": doc_idx in relevants,
+                    "relevance_score": float(relevants.get(doc_idx, 0.0))
+                }
+                entry["top_documents"].append(doc_meta)
+            
+            self.analysis_records.append(entry)
+    
+    def save_analysis(self, path: Path):
+        """Persist collected analysis data to disk."""
+        if not self.analysis_records:
+            print("ℹ️  No analysis data collected.")
+            return
+        
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "analysis": self.analysis_records,
+            "top_k": int(self.analysis_config.get("top_k", 0))
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"📝 Analysis data written to {path}")
     
     def create_retrieval_queries(self, papers: List[Dict], max_queries: Optional[int] = None) -> List[Dict]:
         """Create comprehensive retrieval queries from paper content with graded relevance."""
@@ -681,7 +839,8 @@ class MTEBRetrievalBenchmark:
                           model_name: str, 
                           embedding_function, 
                           dataset_size: int = 100,
-                          test_queries: int = 50) -> MTEBResult:
+                          test_queries: int = 50,
+                          external_queries: Optional[List[Dict]] = None) -> MTEBResult:
         """Run comprehensive MTEB-style benchmark."""
         print(f"\n🧪 Running MTEB-style benchmark for {model_name}")
         print("=" * 60)
@@ -693,13 +852,46 @@ class MTEBRetrievalBenchmark:
         
         # 2. Create retrieval queries
         print("🔍 Creating retrieval queries...")
-        queries = self.create_retrieval_queries(papers, max_queries=test_queries)
-        queries = [q for q in queries if q.get("relevant_items")]
+        if external_queries:
+            queries = self._build_external_queries(papers, external_queries, limit=test_queries)
+        else:
+            queries = self.create_retrieval_queries(papers, max_queries=test_queries)
+            queries = [q for q in queries if q.get("relevant_items")]
         print(f"   Created {len(queries)} queries")
+        
+        if not queries:
+            print("⚠️  No queries available after filtering; skipping benchmark.")
+            empty_result = MTEBResult(
+                model_name=model_name,
+                dataset_name="academic_papers",
+                task_type="retrieval",
+                accuracy=0.0,
+                precision=0.0,
+                recall=0.0,
+                f1_score=0.0,
+                mrr=0.0,
+                ndcg=0.0,
+                embedding_time=0.0,
+                search_time=0.0,
+                total_documents=len(papers),
+                total_queries=0,
+                success_rate=0.0
+            )
+            return empty_result
         
         # 3. Generate embeddings for documents
         print("⚡ Generating document embeddings...")
         doc_texts = [f"{paper['title']} {paper['abstract']}" for paper in papers]
+        doc_metadata = []
+        for idx, paper in enumerate(papers):
+            doc_metadata.append({
+                "paper_index": idx,
+                "title": paper.get("title"),
+                "url": paper.get("url"),
+                "category": paper.get("category"),
+                "year": paper.get("year"),
+                "abstract_preview": paper.get("abstract", "")[:200]
+            })
         
         start_time = time.time()
         doc_embeddings = embedding_function(doc_texts)
@@ -744,6 +936,17 @@ class MTEBRetrievalBenchmark:
         # 6. Calculate MTEB metrics
         print("📊 Calculating MTEB metrics...")
         metrics = self.calculate_mteb_metrics(query_results, relevant_sets)
+        
+        # Optional detailed analysis
+        if queries and self.analysis_config.get("top_k", 0):
+            self._collect_analysis(
+                model_name=model_name,
+                mode="abstract",
+                queries=queries,
+                query_results=query_results,
+                relevant_sets=relevant_sets,
+                documents_metadata=doc_metadata
+            )
         
         # 7. Create result
         result = MTEBResult(
@@ -792,7 +995,8 @@ class MTEBRetrievalBenchmark:
                                model_name: str, 
                                embedding_function, 
                                dataset_size: int = 100,
-                               test_queries: int = 50) -> MTEBResult:
+                               test_queries: int = 50,
+                               external_queries: Optional[List[Dict]] = None) -> MTEBResult:
         """Run MTEB-style benchmark using full text of papers."""
         print(f"\n🧪 Running MTEB-style benchmark (FULL TEXT mode) for {model_name}")
         print("=" * 60)
@@ -811,18 +1015,36 @@ class MTEBRetrievalBenchmark:
         
         # 2. Create retrieval queries from full text chunks
         print("🔍 Creating retrieval queries from full text chunks...")
-        queries = self.create_full_text_retrieval_queries(papers_with_fulltext[:test_queries])
-        queries = [q for q in queries if q.get("relevant_items")]
-        covered_chunks = {idx for query in queries for idx in query["relevant_items"].keys()}
-        print(f"   Created {len(queries)} queries covering {len(covered_chunks)} chunks")
+        if external_queries:
+            # We'll build queries after chunk mapping is available
+            raw_query_records = external_queries
+            queries = None
+        else:
+            queries = self.create_full_text_retrieval_queries(papers_with_fulltext[:test_queries])
+            queries = [q for q in queries if q.get("relevant_items")]
+            covered_chunks = {idx for query in queries for idx in query["relevant_items"].keys()}
+            print(f"   Created {len(queries)} queries covering {len(covered_chunks)} chunks")
         
         # 3. Generate embeddings for all chunks
         print("⚡ Generating embeddings for document chunks...")
         chunk_texts = []
+        chunk_metadata: List[Dict[str, Any]] = []
+        paper_to_chunks: Dict[int, List[int]] = defaultdict(list)
         for paper_idx, paper in enumerate(papers_with_fulltext):
             if "full_text_chunks" in paper:
-                for chunk in paper["full_text_chunks"]:
+                for local_chunk_idx, chunk in enumerate(paper["full_text_chunks"]):
+                    chunk_id = len(chunk_texts)
                     chunk_texts.append(chunk['text'])
+                    paper_to_chunks[paper_idx].append(chunk_id)
+                    chunk_metadata.append({
+                        "paper_index": paper_idx,
+                        "paper_title": paper.get("title"),
+                        "paper_url": paper.get("url"),
+                        "chunk_index": local_chunk_idx,
+                        "source": chunk.get("source"),
+                        "char_count": chunk.get("char_count"),
+                        "chunk_preview": chunk['text'][:200]
+                    })
         
         start_time = time.time()
         doc_embeddings = embedding_function(chunk_texts)
@@ -834,6 +1056,38 @@ class MTEBRetrievalBenchmark:
         
         # 4. Generate embeddings for queries
         print("🔍 Generating query embeddings...")
+        if external_queries:
+            queries = self._build_external_queries(
+                papers_with_fulltext,
+                raw_query_records,
+                limit=test_queries,
+                expand_to_chunks=True,
+                paper_to_chunks=paper_to_chunks
+            )
+            covered_chunks = {idx for query in queries for idx in query["relevant_items"].keys()}
+            print(f"   Loaded {len(queries)} external queries covering {len(covered_chunks)} chunks")
+        
+        if not queries:
+            print("⚠️  No queries available after filtering; skipping benchmark.")
+            empty_result = MTEBResult(
+                model_name=model_name,
+                dataset_name="academic_papers_fulltext",
+                task_type="retrieval_fulltext",
+                accuracy=0.0,
+                precision=0.0,
+                recall=0.0,
+                f1_score=0.0,
+                mrr=0.0,
+                ndcg=0.0,
+                embedding_time=0.0,
+                search_time=0.0,
+                total_documents=len(chunk_texts),
+                total_queries=0,
+                success_rate=0.0,
+                use_full_text=True
+            )
+            return empty_result
+        
         query_texts = [query["query"] for query in queries]
         
         start_time = time.time()
@@ -868,6 +1122,17 @@ class MTEBRetrievalBenchmark:
         # 6. Calculate MTEB metrics
         print("📊 Calculating MTEB metrics...")
         metrics = self.calculate_mteb_metrics(query_results, relevant_sets)
+        
+        # Optional detailed analysis
+        if queries and self.analysis_config.get("top_k", 0):
+            self._collect_analysis(
+                model_name=model_name,
+                mode="full_text",
+                queries=queries,
+                query_results=query_results,
+                relevant_sets=relevant_sets,
+                documents_metadata=chunk_metadata
+            )
         
         # 7. Create result
         result = MTEBResult(
@@ -921,6 +1186,8 @@ def run_mteb_integration_benchmark(
     dataset_size: int = 100,
     test_queries: int = 50,
     cache_dir: Optional[str] = None,
+    query_records: Optional[List[Dict]] = None,
+    analysis_config: Optional[Dict[str, Any]] = None,
 ):
     """Run comprehensive MTEB-style integration benchmark."""
     print("🚀 MTEB-Style Integration Benchmark for Local Embedding Models")
@@ -931,9 +1198,11 @@ def run_mteb_integration_benchmark(
     else:
         print("📄 Using title + abstract of papers for benchmark")
     print("Testing with real academic papers and intensive evaluation")
+    if query_records:
+        print(f"🔖 Loaded external query set with {len(query_records)} entries")
     
     # Initialize benchmark
-    benchmark = MTEBRetrievalBenchmark(cache_dir=cache_dir)
+    benchmark = MTEBRetrievalBenchmark(cache_dir=cache_dir, analysis_config=analysis_config)
     results = []
     
     # Test 1: Default ChromaDB model
@@ -948,14 +1217,16 @@ def run_mteb_integration_benchmark(
                 model_name="Default ChromaDB (all-MiniLM-L6-v2)",
                 embedding_function=default_ef,
                 dataset_size=dataset_size,
-                test_queries=test_queries
+                test_queries=test_queries,
+                external_queries=query_records
             )
         else:
             default_result = benchmark.run_mteb_benchmark(
                 model_name="Default ChromaDB (all-MiniLM-L6-v2)",
                 embedding_function=default_ef,
                 dataset_size=dataset_size,
-                test_queries=test_queries
+                test_queries=test_queries,
+                external_queries=query_records
             )
         default_result.use_full_text = use_full_text
         results.append(default_result)
@@ -967,7 +1238,7 @@ def run_mteb_integration_benchmark(
         model_name = local_model_name
     else:
         model_name = "google/embeddinggemma-300m-qat-q8_0-unquantized"
-        model_name = "Qwen/Qwen3-Embedding-4B"
+        model_name = "Qwen/Qwen3-Embedding-0.6B"
     
     print(f"\n{'='*80}")
     print(f"🧪 Testing {model_name} Model")
@@ -980,14 +1251,16 @@ def run_mteb_integration_benchmark(
                 model_name=model_name,
                 embedding_function=local_ef,
                 dataset_size=dataset_size,
-                test_queries=test_queries
+                test_queries=test_queries,
+                external_queries=query_records
             )
         else:
             local_result = benchmark.run_mteb_benchmark(
                 model_name=model_name,
                 embedding_function=local_ef,
                 dataset_size=dataset_size,
-                test_queries=test_queries
+                test_queries=test_queries,
+                external_queries=query_records
             )
         local_result.use_full_text = use_full_text
         results.append(local_result)
@@ -1056,6 +1329,11 @@ def run_mteb_integration_benchmark(
         else:
             print(f"  🥇 Default model wins on MRR: {default.mrr:.3f} vs {local.mrr:.3f}")
     
+    # Persist analysis if requested
+    if analysis_config and analysis_config.get("output_path"):
+        output_path = Path(analysis_config["output_path"]).expanduser()
+        benchmark.save_analysis(output_path)
+    
     return results
 
 def main():
@@ -1088,8 +1366,49 @@ def main():
         action="store_true", 
         help="Use full text of papers for embedding and retrieval"
     )
+    parser.add_argument(
+        "--query-file",
+        type=str,
+        help="Path to a JSON file containing external queries with relevance annotations"
+    )
+    parser.add_argument(
+        "--analysis-output",
+        type=str,
+        help="Optional path to write per-query analysis results (JSON)"
+    )
+    parser.add_argument(
+        "--analysis-top-k",
+        type=int,
+        default=0,
+        help="Collect per-query diagnostics for the top-K retrieved documents (disabled by default)"
+    )
     
     args = parser.parse_args()
+    
+    query_records = None
+    if args.query_file:
+        query_path = Path(args.query_file).expanduser()
+        if not query_path.exists():
+            raise FileNotFoundError(f"Query file not found: {query_path}")
+        with open(query_path) as f:
+            query_payload = json.load(f)
+        if isinstance(query_payload, dict) and "queries" in query_payload:
+            query_records = query_payload["queries"]
+        elif isinstance(query_payload, list):
+            query_records = query_payload
+        else:
+            raise ValueError("Query file must contain either a list of queries or an object with a 'queries' field.")
+    
+    analysis_config = None
+    analysis_top_k = args.analysis_top_k
+    if args.analysis_output and analysis_top_k <= 0:
+        analysis_top_k = 10
+    
+    if analysis_top_k > 0 or args.analysis_output:
+        analysis_config = {
+            "top_k": max(0, analysis_top_k),
+            "output_path": args.analysis_output
+        }
     
     run_mteb_integration_benchmark(
         local_model_name=args.model,
@@ -1097,6 +1416,8 @@ def main():
         dataset_size=args.dataset_size,
         test_queries=args.test_queries,
         cache_dir=args.cache_dir,
+        query_records=query_records,
+        analysis_config=analysis_config,
     )
 
 if __name__ == "__main__":
