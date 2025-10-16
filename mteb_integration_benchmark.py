@@ -75,6 +75,7 @@ import argparse
 from urllib.parse import urlparse
 import gzip
 import pickle
+import math
 
 # Add src to path
 src_path = Path(__file__).parent / "src"
@@ -254,8 +255,16 @@ class AcademicPaperDataset:
             categories = ['cs.AI', 'cs.CL', 'cs.LG', 'cs.CV', 'cs.IR', 'cs.NE', 'stat.ML']
         
         papers = []
-        for category in categories:
-            papers.extend(self._fetch_arxiv_category(category, max_papers // len(categories), use_full_text))
+        remaining = max_papers
+        total_categories = len(categories)
+        for idx, category in enumerate(categories):
+            if remaining <= 0:
+                break
+            categories_left = total_categories - idx
+            per_category = max(1, math.ceil(remaining / categories_left))
+            fetched = self._fetch_arxiv_category(category, per_category, use_full_text)
+            papers.extend(fetched)
+            remaining = max_papers - len(papers)
         
         return papers[:max_papers]
     
@@ -958,7 +967,7 @@ def run_mteb_integration_benchmark(
         model_name = local_model_name
     else:
         model_name = "google/embeddinggemma-300m-qat-q8_0-unquantized"
-        model_name = "Qwen/Qwen3-Embedding-0.6B"
+        model_name = "Qwen/Qwen3-Embedding-4B"
     
     print(f"\n{'='*80}")
     print(f"🧪 Testing {model_name} Model")
