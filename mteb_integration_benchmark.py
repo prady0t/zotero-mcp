@@ -62,13 +62,16 @@ METRICS:
 import sys
 import time
 import json
+import csv
+import re
 import requests
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from collections import defaultdict
+from datetime import datetime
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import tempfile
 import os
 import argparse
@@ -84,6 +87,110 @@ sys.path.insert(0, str(src_path))
 from zotero_mcp.chroma_client import LocalEmbeddingFunction, create_chroma_client
 import chromadb.utils.embedding_functions
 
+DEFAULT_QUERY_FILE = Path(__file__).parent / "benchmarks" / "queries" / "semantic_retrieval_queries.json"
+DEFAULT_MODELS = ["chromadb-default", "Qwen/Qwen3-Embedding-0.6B"]
+DEFAULT_MODES = ["abstract", "full_text"]
+SCOREBOARD_METRICS = ["accuracy", "precision", "recall", "mrr", "ndcg", "map_score"]
+
+
+def slugify_model_name(name: str) -> str:
+    """Create filesystem-safe slug from model name."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", name.lower()).strip("_")
+    return slug or "model"
+
+
+def _init_bucket() -> Dict[str, Any]:
+    return {
+        "queries": 0,
+        "queries_with_relevance": 0,
+        "hit_at_1_count": 0,
+        "hit_at_5_count": 0,
+        "hit_at_10_count": 0,
+        "best_rank_sum": 0.0,
+        "best_rank_hits": 0,
+    }
+
+
+def _update_bucket(bucket: Dict[str, Any], stat: Dict[str, Any]):
+    bucket["queries"] += 1
+    if stat.get("has_relevance"):
+        bucket["queries_with_relevance"] += 1
+    if stat.get("top1_hit"):
+        bucket["hit_at_1_count"] += 1
+    if stat.get("top5_hit"):
+        bucket["hit_at_5_count"] += 1
+    if stat.get("top10_hit"):
+        bucket["hit_at_10_count"] += 1
+    best_rank = stat.get("best_rank")
+    if best_rank is not None:
+        bucket["best_rank_sum"] += best_rank
+        bucket["best_rank_hits"] += 1
+
+
+def _finalize_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
+    queries = bucket.get("queries", 0)
+    if queries > 0:
+        bucket["hit_at_1"] = bucket["hit_at_1_count"] / queries
+        bucket["hit_at_5"] = bucket["hit_at_5_count"] / queries
+        bucket["hit_at_10"] = bucket["hit_at_10_count"] / queries
+    else:
+        bucket["hit_at_1"] = bucket["hit_at_5"] = bucket["hit_at_10"] = 0.0
+    
+    hits = bucket.get("best_rank_hits", 0)
+    if hits > 0:
+        bucket["mean_best_rank"] = bucket["best_rank_sum"] / hits
+    else:
+        bucket["mean_best_rank"] = None
+    
+    # Remove intermediate counters
+    for key in ["hit_at_1_count", "hit_at_5_count", "hit_at_10_count", "best_rank_sum", "best_rank_hits"]:
+        bucket.pop(key, None)
+    
+    return bucket
+
+
+def compute_query_breakdown(results: List[MTEBResult]) -> Dict[str, Any]:
+    breakdown: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    
+    for result in results:
+        mode = "full_text" if result.use_full_text else "abstract"
+        model = result.model_name
+        model_entry = breakdown.setdefault(mode, {}).setdefault(model, {
+            "overall": _init_bucket(),
+            "by_category": {},
+            "by_difficulty": {}
+        })
+        
+        for stat in result.per_query_stats:
+            _update_bucket(model_entry["overall"], stat)
+            
+            category = stat.get("category") or "uncategorized"
+            cat_bucket = model_entry["by_category"].setdefault(category, _init_bucket())
+            _update_bucket(cat_bucket, stat)
+            
+            difficulty = stat.get("difficulty")
+            if difficulty is None:
+                diff_key = "unspecified"
+            else:
+                diff_key = str(difficulty)
+            diff_bucket = model_entry["by_difficulty"].setdefault(diff_key, _init_bucket())
+            _update_bucket(diff_bucket, stat)
+    
+    # Finalize ratios
+    for mode_dict in breakdown.values():
+        for model_dict in mode_dict.values():
+            model_dict["overall"] = _finalize_bucket(model_dict["overall"])
+            model_dict["by_category"] = {
+                category: _finalize_bucket(bucket)
+                for category, bucket in model_dict["by_category"].items()
+            }
+            model_dict["by_difficulty"] = {
+                difficulty: _finalize_bucket(bucket)
+                for difficulty, bucket in model_dict["by_difficulty"].items()
+            }
+    
+    return breakdown
+
 @dataclass
 class MTEBResult:
     """MTEB-style benchmark results."""
@@ -96,12 +203,14 @@ class MTEBResult:
     f1_score: float
     mrr: float  # Mean Reciprocal Rank
     ndcg: float  # Normalized Discounted Cumulative Gain
+    map_score: float
     embedding_time: float
     search_time: float
     total_documents: int
     total_queries: int
     success_rate: float
     use_full_text: bool = False
+    per_query_stats: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class TextChunker:
@@ -568,6 +677,8 @@ class MTEBRetrievalBenchmark:
             queries.append({
                 "id": record.get("id"),
                 "query": query_text,
+                "category": record.get("category"),
+                "difficulty": record.get("difficulty"),
                 "relevant_items": relevant_items
             })
             
@@ -948,6 +1059,29 @@ class MTEBRetrievalBenchmark:
                 documents_metadata=doc_metadata
             )
         
+        # Per-query stats
+        per_query_stats = []
+        for query, rankings, relevants in zip(queries, query_results, relevant_sets):
+            best_rank = None
+            for rank, doc_idx in enumerate(rankings, start=1):
+                if doc_idx in relevants:
+                    best_rank = rank
+                    break
+            stat = {
+                "query_id": query.get("id"),
+                "query_text": query.get("query"),
+                "category": query.get("category"),
+                "difficulty": query.get("difficulty"),
+                "mode": "abstract",
+                "has_relevance": bool(relevants),
+                "best_rank": best_rank,
+                "top1_hit": best_rank is not None and best_rank <= 1,
+                "top5_hit": best_rank is not None and best_rank <= 5,
+                "top10_hit": best_rank is not None and best_rank <= 10,
+                "relevant_count": len(relevants),
+            }
+            per_query_stats.append(stat)
+        
         # 7. Create result
         result = MTEBResult(
             model_name=model_name,
@@ -961,11 +1095,13 @@ class MTEBRetrievalBenchmark:
                      (metrics.get('precision@5', 0.0) + metrics.get('recall@5', 0.0)) > 0 else 0.0,
             mrr=metrics.get('mrr', 0.0),
             ndcg=metrics.get('ndcg@10', 0.0),
+            map_score=metrics.get('map', 0.0),
             embedding_time=embedding_time + query_embedding_time,
             search_time=search_time,
             total_documents=len(papers),
             total_queries=len(queries),
-            success_rate=metrics.get('precision@5', 0.0)
+            success_rate=metrics.get('precision@5', 0.0),
+            per_query_stats=per_query_stats
         )
         
         # 8. Display results
@@ -976,7 +1112,7 @@ class MTEBRetrievalBenchmark:
         print(f"   F1-Score: {result.f1_score:.3f}")
         print(f"   MRR: {result.mrr:.3f}")
         print(f"   NDCG@10: {result.ndcg:.3f}")
-        print(f"   MAP: {metrics.get('map', 0.0):.3f}")
+        print(f"   MAP: {result.map_score:.3f}")
         print(f"   Embedding time: {result.embedding_time:.3f}s")
         print(f"   Search time: {result.search_time:.3f}s")
         
@@ -1134,6 +1270,28 @@ class MTEBRetrievalBenchmark:
                 documents_metadata=chunk_metadata
             )
         
+        per_query_stats = []
+        for query, rankings, relevants in zip(queries, query_results, relevant_sets):
+            best_rank = None
+            for rank, doc_idx in enumerate(rankings, start=1):
+                if doc_idx in relevants:
+                    best_rank = rank
+                    break
+            stat = {
+                "query_id": query.get("id"),
+                "query_text": query.get("query"),
+                "category": query.get("category"),
+                "difficulty": query.get("difficulty"),
+                "mode": "full_text",
+                "has_relevance": bool(relevants),
+                "best_rank": best_rank,
+                "top1_hit": best_rank is not None and best_rank <= 1,
+                "top5_hit": best_rank is not None and best_rank <= 5,
+                "top10_hit": best_rank is not None and best_rank <= 10,
+                "relevant_count": len(relevants),
+            }
+            per_query_stats.append(stat)
+        
         # 7. Create result
         result = MTEBResult(
             model_name=model_name,
@@ -1147,12 +1305,14 @@ class MTEBRetrievalBenchmark:
                      (metrics.get('precision@5', 0.0) + metrics.get('recall@5', 0.0)) > 0 else 0.0,
             mrr=metrics.get('mrr', 0.0),
             ndcg=metrics.get('ndcg@10', 0.0),
+            map_score=metrics.get('map', 0.0),
             embedding_time=embedding_time + query_embedding_time,
             search_time=search_time,
             total_documents=len(chunk_texts),
             total_queries=len(queries),
             success_rate=metrics.get('precision@5', 0.0),
-            use_full_text=True
+            use_full_text=True,
+            per_query_stats=per_query_stats
         )
         
         # 8. Display results
@@ -1163,7 +1323,7 @@ class MTEBRetrievalBenchmark:
         print(f"   F1-Score: {result.f1_score:.3f}")
         print(f"   MRR: {result.mrr:.3f}")
         print(f"   NDCG@10: {result.ndcg:.3f}")
-        print(f"   MAP: {metrics.get('map', 0.0):.3f}")
+        print(f"   MAP: {result.map_score:.3f}")
         print(f"   Embedding time: {result.embedding_time:.3f}s")
         print(f"   Search time: {result.search_time:.3f}s")
         print(f"   Document chunks: {result.total_documents}")
@@ -1181,158 +1341,186 @@ class MTEBRetrievalBenchmark:
 
 
 def run_mteb_integration_benchmark(
-    local_model_name: str = None,
-    use_full_text: bool = False,
+    model_names: List[str],
+    modes: List[str],
     dataset_size: int = 100,
     test_queries: int = 50,
     cache_dir: Optional[str] = None,
     query_records: Optional[List[Dict]] = None,
-    analysis_config: Optional[Dict[str, Any]] = None,
-):
-    """Run comprehensive MTEB-style integration benchmark."""
+    analysis_top_k: int = 0,
+    output_dir: Optional[Path] = None,
+) -> List[MTEBResult]:
+    """Run comprehensive MTEB-style integration benchmark for one or more models."""
+    base_dir = Path(__file__).parent
+    output_dir = Path(output_dir) if output_dir else base_dir / "benchmarks" / "results" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     print("🚀 MTEB-Style Integration Benchmark for Local Embedding Models")
     print("=" * 80)
-    print("Following MTEB leaderboard methodology for retrieval tasks")
-    if use_full_text:
-        print("📄 Using FULL TEXT of papers for benchmark")
-    else:
-        print("📄 Using title + abstract of papers for benchmark")
-    print("Testing with real academic papers and intensive evaluation")
+    print(f"Results directory: {output_dir}")
     if query_records:
         print(f"🔖 Loaded external query set with {len(query_records)} entries")
+    print(f"Evaluating modes: {', '.join(modes)}")
+    print(f"Benchmarking models: {', '.join(model_names)}")
     
-    # Initialize benchmark
-    benchmark = MTEBRetrievalBenchmark(cache_dir=cache_dir, analysis_config=analysis_config)
-    results = []
+    results: List[MTEBResult] = []
+    summary_rows: List[Dict[str, Any]] = []
     
-    # Test 1: Default ChromaDB model
-    print(f"\n{'='*80}")
-    print("🧪 Testing Default ChromaDB Model")
-    print("=" * 80)
+    for mode in modes:
+        use_full_text = mode == "full_text"
+        mode_label = "FULL TEXT" if use_full_text else "TITLE + ABSTRACT"
+        print(f"\n{'=' * 80}")
+        print(f"🧪 Mode: {mode_label}")
+        print(f"{'=' * 80}")
+        
+        for model_identifier in model_names:
+            is_default_model = model_identifier == "chromadb-default"
+            display_name = "Default ChromaDB (all-MiniLM-L6-v2)" if is_default_model else model_identifier
+            print(f"\n--- Running {display_name} ---")
+            
+            analysis_path = None
+            analysis_config = None
+            if analysis_top_k > 0:
+                analysis_path = output_dir / "analysis" / mode / f"{slugify_model_name(display_name)}.json"
+                analysis_config = {
+                    "top_k": analysis_top_k,
+                    "output_path": analysis_path
+                }
+            
+            benchmark = MTEBRetrievalBenchmark(cache_dir=cache_dir, analysis_config=analysis_config)
+            
+            try:
+                if is_default_model:
+                    embedding_function = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+                else:
+                    embedding_function = LocalEmbeddingFunction(model_name=model_identifier)
+                
+                if use_full_text:
+                    result = benchmark.run_full_text_benchmark(
+                        model_name=display_name,
+                        embedding_function=embedding_function,
+                        dataset_size=dataset_size,
+                        test_queries=test_queries,
+                        external_queries=query_records
+                    )
+                else:
+                    result = benchmark.run_mteb_benchmark(
+                        model_name=display_name,
+                        embedding_function=embedding_function,
+                        dataset_size=dataset_size,
+                        test_queries=test_queries,
+                        external_queries=query_records
+                    )
+                result.use_full_text = use_full_text
+                results.append(result)
+                
+                summary_rows.append({
+                    "mode": mode,
+                    "model": display_name,
+                    "accuracy": result.accuracy,
+                    "precision": result.precision,
+                    "recall": result.recall,
+                    "f1_score": result.f1_score,
+                    "mrr": result.mrr,
+                    "ndcg": result.ndcg,
+                    "map_score": result.map_score,
+                    "embedding_time": result.embedding_time,
+                    "search_time": result.search_time,
+                    "total_documents": result.total_documents,
+                    "total_queries": result.total_queries,
+                    "success_rate": result.success_rate
+                })
+                
+                if analysis_path:
+                    benchmark.save_analysis(analysis_path)
+            except Exception as exc:
+                print(f"❌ Error testing {display_name} ({mode}): {exc}")
+                import traceback
+                traceback.print_exc()
+                continue
     
-    try:
-        default_ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
-        if use_full_text:
-            default_result = benchmark.run_full_text_benchmark(
-                model_name="Default ChromaDB (all-MiniLM-L6-v2)",
-                embedding_function=default_ef,
-                dataset_size=dataset_size,
-                test_queries=test_queries,
-                external_queries=query_records
+    if not summary_rows:
+        print("⚠️  No successful benchmark runs were recorded.")
+        return results
+    
+    summary_rows = sorted(summary_rows, key=lambda r: (r["mode"], r["model"]))
+    
+    # Persist summary outputs
+    summary_json_path = output_dir / "summary.json"
+    with open(summary_json_path, "w") as f:
+        json.dump(summary_rows, f, indent=2)
+    print(f"\n📝 Summary written to {summary_json_path}")
+    
+    summary_csv_path = output_dir / "summary.csv"
+    csv_fields = [
+        "mode", "model", "accuracy", "precision", "recall", "f1_score",
+        "mrr", "ndcg", "map_score", "embedding_time", "search_time",
+        "total_documents", "total_queries", "success_rate"
+    ]
+    with open(summary_csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=csv_fields)
+        writer.writeheader()
+        for row in summary_rows:
+            writer.writerow(row)
+    print(f"📝 Summary CSV written to {summary_csv_path}")
+    
+    # Pretty scoreboard
+    print("\n🏆 Benchmark Scoreboard")
+    for mode in modes:
+        mode_rows = [row for row in summary_rows if row["mode"] == mode]
+        if not mode_rows:
+            continue
+        mode_label = "Full Text" if mode == "full_text" else "Title + Abstract"
+        print(f"\n{mode_label} Results")
+        print("-" * 60)
+        best_values: Dict[str, float] = {
+            metric: max((row[metric] for row in mode_rows), default=0.0)
+            for metric in SCOREBOARD_METRICS
+        }
+        
+        header = f"{'Model':30} {'P@1':>6} {'P@5':>6} {'R@5':>6} {'MRR':>6} {'NDCG':>6} {'MAP':>6}"
+        print(header)
+        print("-" * len(header))
+        for row in mode_rows:
+            def fmt(metric: str) -> str:
+                value = row[metric]
+                formatted = f"{value:.3f}"
+                if abs(value - best_values[metric]) < 1e-6:
+                    formatted = f"{formatted}*"
+                return formatted.rjust(6 + (1 if "*" in formatted else 0))
+            
+            line = (
+                f"{row['model'][:30]:30} "
+                f"{fmt('accuracy')} {fmt('precision')} {fmt('recall')} "
+                f"{fmt('mrr')} {fmt('ndcg')} {fmt('map_score')}"
             )
-        else:
-            default_result = benchmark.run_mteb_benchmark(
-                model_name="Default ChromaDB (all-MiniLM-L6-v2)",
-                embedding_function=default_ef,
-                dataset_size=dataset_size,
-                test_queries=test_queries,
-                external_queries=query_records
-            )
-        default_result.use_full_text = use_full_text
-        results.append(default_result)
-    except Exception as e:
-        print(f"❌ Error testing default model: {e}")
+            print(line)
+        print("-" * len(header))
     
-    # Test 2: Local model
-    if local_model_name:
-        model_name = local_model_name
-    else:
-        model_name = "google/embeddinggemma-300m-qat-q8_0-unquantized"
-        model_name = "Qwen/Qwen3-Embedding-0.6B"
+    # Query breakdown
+    query_breakdown = compute_query_breakdown(results)
+    breakdown_path = output_dir / "query_breakdown.json"
+    with open(breakdown_path, "w") as f:
+        json.dump(query_breakdown, f, indent=2)
+    print(f"\n📝 Query breakdown written to {breakdown_path}")
     
-    print(f"\n{'='*80}")
-    print(f"🧪 Testing {model_name} Model")
-    print("=" * 80)
-    
-    try:
-        local_ef = LocalEmbeddingFunction(model_name=model_name)
-        if use_full_text:
-            local_result = benchmark.run_full_text_benchmark(
-                model_name=model_name,
-                embedding_function=local_ef,
-                dataset_size=dataset_size,
-                test_queries=test_queries,
-                external_queries=query_records
-            )
-        else:
-            local_result = benchmark.run_mteb_benchmark(
-                model_name=model_name,
-                embedding_function=local_ef,
-                dataset_size=dataset_size,
-                test_queries=test_queries,
-                external_queries=query_records
-            )
-        local_result.use_full_text = use_full_text
-        results.append(local_result)
-    except Exception as e:
-        print(f"❌ Error testing {model_name} model: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # Compare results
-    if len(results) == 2:
-        print(f"\n🏆 MTEB-STYLE BENCHMARK COMPARISON")
-        print("=" * 80)
-        
-        default = results[0]
-        local = results[1]
-        
-        print(f"MTEB Leaderboard-Style Results:")
-        print(f"  Default ChromaDB:")
-        print(f"    Accuracy (P@1): {default.accuracy:.3f}")
-        print(f"    Precision@5: {default.precision:.3f}")
-        print(f"    Recall@5: {default.recall:.3f}")
-        print(f"    F1-Score: {default.f1_score:.3f}")
-        print(f"    MRR: {default.mrr:.3f}")
-        print(f"    NDCG@10: {default.ndcg:.3f}")
-        print(f"    Embedding time: {default.embedding_time:.3f}s")
-        
-        print(f"  {local.model_name}:")
-        print(f"    Accuracy (P@1): {local.accuracy:.3f}")
-        print(f"    Precision@5: {local.precision:.3f}")
-        print(f"    Recall@5: {local.recall:.3f}")
-        print(f"    F1-Score: {local.f1_score:.3f}")
-        print(f"    MRR: {local.mrr:.3f}")
-        print(f"    NDCG@10: {local.ndcg:.3f}")
-        print(f"    Embedding time: {local.embedding_time:.3f}s")
-        
-        # Calculate improvements
-        accuracy_improvement = local.accuracy - default.accuracy
-        precision_improvement = local.precision - default.precision
-        recall_improvement = local.recall - default.recall
-        f1_improvement = local.f1_score - default.f1_score
-        mrr_improvement = local.mrr - default.mrr
-        ndcg_improvement = local.ndcg - default.ndcg
-        
-        print(f"\n📈 Performance Analysis:")
-        print(f"  Accuracy improvement: {accuracy_improvement:+.3f}")
-        print(f"  Precision improvement: {precision_improvement:+.3f}")
-        print(f"  Recall improvement: {recall_improvement:+.3f}")
-        print(f"  F1-Score improvement: {f1_improvement:+.3f}")
-        print(f"  MRR improvement: {mrr_improvement:+.3f}")
-        print(f"  NDCG improvement: {ndcg_improvement:+.3f}")
-        
-        # Determine winner
-        print(f"\n🎯 MTEB-Style Leaderboard Results:")
-        if local.accuracy > default.accuracy:
-            print(f"  🥇 {local.model_name} wins on Accuracy: {local.accuracy:.3f} vs {default.accuracy:.3f}")
-        else:
-            print(f"  🥇 Default model wins on Accuracy: {default.accuracy:.3f} vs {local.accuracy:.3f}")
-        
-        if local.ndcg > default.ndcg:
-            print(f"  🥇 {local.model_name} wins on NDCG: {local.ndcg:.3f} vs {default.ndcg:.3f}")
-        else:
-            print(f"  🥇 Default model wins on NDCG: {default.ndcg:.3f} vs {local.ndcg:.3f}")
-        
-        if local.mrr > default.mrr:
-            print(f"  🥇 {local.model_name} wins on MRR: {local.mrr:.3f} vs {default.mrr:.3f}")
-        else:
-            print(f"  🥇 Default model wins on MRR: {default.mrr:.3f} vs {local.mrr:.3f}")
-    
-    # Persist analysis if requested
-    if analysis_config and analysis_config.get("output_path"):
-        output_path = Path(analysis_config["output_path"]).expanduser()
-        benchmark.save_analysis(output_path)
+    for mode, models_dict in query_breakdown.items():
+        mode_label = "Full Text" if mode == "full_text" else "Title + Abstract"
+        print(f"\n🔍 {mode_label} category hit@5 (top 3 per model)")
+        for model_name, stats in models_dict.items():
+            categories = stats.get("by_category", {})
+            if not categories:
+                continue
+            top_categories = sorted(
+                categories.items(),
+                key=lambda item: item[1].get("hit_at_5", 0.0),
+                reverse=True
+            )[:3]
+            print(f"  {model_name}:")
+            for category, data in top_categories:
+                hit5 = data.get("hit_at_5", 0.0)
+                queries = data.get("queries", 0)
+                print(f"    {category}: hit@5={hit5:.2f} ({queries} queries)")
     
     return results
 
@@ -1340,9 +1528,14 @@ def main():
     """Main function with command line argument parsing."""
     parser = argparse.ArgumentParser(description="MTEB-style benchmark for local embedding models")
     parser.add_argument(
-        "--model", 
-        type=str, 
-        help="HuggingFace model name (e.g., 'Qwen/Qwen3-Embedding-0.6B')"
+        "--models",
+        nargs="+",
+        help="List of additional embedding models to benchmark (HuggingFace model ids)"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        help="Shortcut for supplying a single additional model (equivalent to --models MODEL)"
     )
     parser.add_argument(
         "--dataset-size", 
@@ -1364,60 +1557,97 @@ def main():
     parser.add_argument(
         "--full-text", 
         action="store_true", 
-        help="Use full text of papers for embedding and retrieval"
+        help="(Deprecated) Run only the full-text benchmark mode"
     )
     parser.add_argument(
         "--query-file",
         type=str,
-        help="Path to a JSON file containing external queries with relevance annotations"
-    )
-    parser.add_argument(
-        "--analysis-output",
-        type=str,
-        help="Optional path to write per-query analysis results (JSON)"
+        default=str(DEFAULT_QUERY_FILE),
+        help=f"Path to a JSON file containing external queries with relevance annotations (default: {DEFAULT_QUERY_FILE})"
     )
     parser.add_argument(
         "--analysis-top-k",
         type=int,
-        default=0,
-        help="Collect per-query diagnostics for the top-K retrieved documents (disabled by default)"
+        default=5,
+        help="Collect per-query diagnostics for the top-K retrieved documents (set to 0 to disable)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Directory to write benchmark outputs (defaults to benchmarks/results/<timestamp>)"
+    )
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=["abstract", "full_text"],
+        help="Benchmark modes to run (default: both abstract and full_text)"
+    )
+    parser.add_argument(
+        "--no-default-model",
+        action="store_true",
+        help="Skip benchmarking the ChromaDB default embedding function"
     )
     
     args = parser.parse_args()
     
-    query_records = None
-    if args.query_file:
-        query_path = Path(args.query_file).expanduser()
-        if not query_path.exists():
-            raise FileNotFoundError(f"Query file not found: {query_path}")
-        with open(query_path) as f:
-            query_payload = json.load(f)
-        if isinstance(query_payload, dict) and "queries" in query_payload:
-            query_records = query_payload["queries"]
-        elif isinstance(query_payload, list):
-            query_records = query_payload
-        else:
-            raise ValueError("Query file must contain either a list of queries or an object with a 'queries' field.")
+    query_path = Path(args.query_file).expanduser()
+    if not query_path.exists():
+        raise FileNotFoundError(f"Query file not found: {query_path}")
+    with open(query_path) as f:
+        query_payload = json.load(f)
+    if isinstance(query_payload, dict) and "queries" in query_payload:
+        query_records = query_payload["queries"]
+    elif isinstance(query_payload, list):
+        query_records = query_payload
+    else:
+        raise ValueError("Query file must contain either a list of queries or an object with a 'queries' field.")
     
-    analysis_config = None
-    analysis_top_k = args.analysis_top_k
-    if args.analysis_output and analysis_top_k <= 0:
-        analysis_top_k = 10
+    # Determine models to benchmark
+    models: List[str] = []
+    if args.models:
+        models.extend(args.models)
+    if args.model:
+        models.append(args.model)
+    if not args.no_default_model:
+        models = ["chromadb-default"] + [m for m in models if m != "chromadb-default"]
+    else:
+        models = [m for m in models if m != "chromadb-default"]
+    if not models:
+        models = DEFAULT_MODELS.copy()
+        if args.no_default_model:
+            models = [m for m in models if m != "chromadb-default"]
+    if not models:
+        raise ValueError("No embedding models specified for benchmarking.")
+    # Deduplicate while preserving order
+    unique_models: List[str] = []
+    for name in models:
+        if name not in unique_models:
+            unique_models.append(name)
+    models = unique_models
     
-    if analysis_top_k > 0 or args.analysis_output:
-        analysis_config = {
-            "top_k": max(0, analysis_top_k),
-            "output_path": args.analysis_output
-        }
+    # Determine benchmark modes
+    if args.modes:
+        modes = args.modes
+    elif args.full_text:
+        modes = ["full_text"]
+    else:
+        modes = DEFAULT_MODES.copy()
+    modes = [mode for mode in modes if mode in {"abstract", "full_text"}]
+    if not modes:
+        raise ValueError("No valid benchmark modes specified.")
+    
+    analysis_top_k = max(0, args.analysis_top_k)
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else None
     
     run_mteb_integration_benchmark(
-        local_model_name=args.model,
-        use_full_text=args.full_text,
+        model_names=models,
+        modes=modes,
         dataset_size=args.dataset_size,
         test_queries=args.test_queries,
         cache_dir=args.cache_dir,
         query_records=query_records,
-        analysis_config=analysis_config,
+        analysis_top_k=analysis_top_k,
+        output_dir=output_dir,
     )
 
 if __name__ == "__main__":

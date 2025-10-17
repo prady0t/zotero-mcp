@@ -2,6 +2,8 @@
   "queries": [
     {
       "id": "q01",
+      "category": "Multimodal Reasoning",
+      "difficulty": 3,
       "query": "Which paper introduces a plugin-style verifier that can self-generate alternate reasoning paths to audit vision-language answers?",
       "relevant_documents": [
         {
@@ -18,6 +20,8 @@
     },
     {
       "id": "q02",
+      "category": "Multimodal Models",
+      "difficulty": 2,
       "query": "I need a fully open recipe for multimodal LLMs that pairs a high-quality corpus with tooling to close the gap with closed models.",
       "relevant_documents": [
         {
@@ -29,6 +33,8 @@
     },
     {
       "id": "q03",
+      "category": "Reinforcement Learning",
+      "difficulty": 3,
       "query": "Find research describing information-theoretic attacks that guarantee the ability to break reinforcement learning agents.",
       "relevant_documents": [
         {
@@ -45,6 +51,8 @@
     },
     {
       "id": "q04",
+      "category": "RL Infrastructure",
+      "difficulty": 2,
       "query": "Which work offers guidance on scheduling compute and data when scaling reinforcement learning fine-tuning for LLMs?",
       "relevant_documents": [
         {
@@ -56,6 +64,8 @@
     },
     {
       "id": "q05",
+      "category": "Robotics",
+      "difficulty": 3,
       "query": "Looking for a robotics approach that couples spatial grounding with vision-language-action policies to build a generalist robot.",
       "relevant_documents": [
         {
@@ -67,6 +77,8 @@
     },
     {
       "id": "q06",
+      "category": "Long Context Reasoning",
+      "difficulty": 2,
       "query": "Is there a method that compresses intermediate reasoning traces into lightweight beacons so long-context models can reason efficiently?",
       "relevant_documents": [
         {
@@ -83,6 +95,8 @@
     },
     {
       "id": "q07",
+      "category": "Long Context Reasoning",
+      "difficulty": 2,
       "query": "Which paper explains how to synthesize short prompts from long retrieved evidence to keep multi-hop QA both fast and faithful?",
       "relevant_documents": [
         {
@@ -99,6 +113,8 @@
     },
     {
       "id": "q08",
+      "category": "Recommendation Systems",
+      "difficulty": 2,
       "query": "Find a sequential recommender that models multiple user interests with LLM reasoning, ideally mixing collaborative signals and language.",
       "relevant_documents": [
         {
@@ -115,6 +131,8 @@
     },
     {
       "id": "q09",
+      "category": "Retrieval-Augmented Generation",
+      "difficulty": 3,
       "query": "Need a retrieval-augmented method that explicitly tracks how knowledge graphs evolve over time to answer questions.",
       "relevant_documents": [
         {
@@ -131,6 +149,8 @@
     },
     {
       "id": "q10",
+      "category": "Generative Models",
+      "difficulty": 2,
       "query": "Which research tackles watermarking content from private diffusion models without introducing noticeable distortions?",
       "relevant_documents": [
         {
@@ -142,6 +162,8 @@
     },
     {
       "id": "q11",
+      "category": "Neuromorphic Computing",
+      "difficulty": 2,
       "query": "Is there a pipeline for deploying spiking neural networks with diverse synaptic delays onto neuromorphic chips such as Loihi 2?",
       "relevant_documents": [
         {
@@ -153,6 +175,8 @@
     },
     {
       "id": "q12",
+      "category": "Physics-Informed Learning",
+      "difficulty": 3,
       "query": "Looking for a physics-informed inversion framework that injects redundant measurements to stabilize gravitational-wave parameter estimation.",
       "relevant_documents": [
         {
@@ -164,6 +188,8 @@
     },
     {
       "id": "q13",
+      "category": "Simulation-Based Inference",
+      "difficulty": 2,
       "query": "Need an approach that adapts the prior distribution at inference time for simulation-based Bayesian analysis.",
       "relevant_documents": [
         {
@@ -175,6 +201,8 @@
     },
     {
       "id": "q14",
+      "category": "Reinforcement Learning Theory",
+      "difficulty": 3,
       "query": "Find results proving asymptotically optimal exploration for reinforcement learning in Block MDP settings.",
       "relevant_documents": [
         {
@@ -186,6 +214,8 @@
     },
     {
       "id": "q15",
+      "category": "Robotics",
+      "difficulty": 2,
       "query": "Is there an open-source toolkit for training humanoid controllers via motion imitation and reinforcement learning?",
       "relevant_documents": [
         {
@@ -197,6 +227,8 @@
     },
     {
       "id": "q16",
+      "category": "Generative Models",
+      "difficulty": 3,
       "query": "Which paper enforces physical law adherence in video generation models by framing synthesis as a reinforcement learning problem?",
       "relevant_documents": [
         {
@@ -208,6 +240,8 @@
     },
     {
       "id": "q17",
+      "category": "Vision-Language Models",
+      "difficulty": 2,
       "query": "How can vision-language models be adapted to a new video domain using lightweight probes instead of full fine-tuning?",
       "relevant_documents": [
         {
@@ -219,6 +253,8 @@
     },
     {
       "id": "q18",
+      "category": "Neuroimaging",
+      "difficulty": 3,
       "query": "Looking for a method that aligns high-resolution fMRI flat maps with vision transformers for neural decoding.",
       "relevant_documents": [
         {
@@ -230,6 +266,8 @@
     },
     {
       "id": "q19",
+      "category": "Vision Question Answering",
+      "difficulty": 2,
       "query": "Which approach turns code generation into a reasoning step to improve visual question answering?",
       "relevant_documents": [
         {
@@ -241,6 +279,8 @@
     },
     {
       "id": "q20",
+      "category": "Mathematics Benchmarks",
+      "difficulty": 2,
       "query": "Find a benchmark that evaluates frontier math solvers by verifying each intermediate derivation rather than just the final answer.",
       "relevant_documents": [
         {
