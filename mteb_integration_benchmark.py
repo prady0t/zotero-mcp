@@ -149,6 +149,28 @@ def _finalize_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
     return bucket
 
 
+@dataclass
+class MTEBResult:
+    """MTEB-style benchmark results."""
+    model_name: str
+    dataset_name: str
+    task_type: str
+    accuracy: float
+    precision: float
+    recall: float
+    f1_score: float
+    mrr: float  # Mean Reciprocal Rank
+    ndcg: float  # Normalized Discounted Cumulative Gain
+    map_score: float
+    embedding_time: float
+    search_time: float
+    total_documents: int
+    total_queries: int
+    success_rate: float
+    use_full_text: bool = False
+    per_query_stats: List[Dict[str, Any]] = field(default_factory=list)
+
+
 def compute_query_breakdown(results: List[MTEBResult]) -> Dict[str, Any]:
     breakdown: Dict[str, Dict[str, Dict[str, Any]]] = {}
     
@@ -190,27 +212,6 @@ def compute_query_breakdown(results: List[MTEBResult]) -> Dict[str, Any]:
             }
     
     return breakdown
-
-@dataclass
-class MTEBResult:
-    """MTEB-style benchmark results."""
-    model_name: str
-    dataset_name: str
-    task_type: str
-    accuracy: float
-    precision: float
-    recall: float
-    f1_score: float
-    mrr: float  # Mean Reciprocal Rank
-    ndcg: float  # Normalized Discounted Cumulative Gain
-    map_score: float
-    embedding_time: float
-    search_time: float
-    total_documents: int
-    total_queries: int
-    success_rate: float
-    use_full_text: bool = False
-    per_query_stats: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class TextChunker:
@@ -358,22 +359,84 @@ class AcademicPaperDataset:
                 print("⚠️  No PDF extraction library available (install PyPDF2 or pdfplumber)")
                 return None
     
-    def get_arxiv_papers(self, categories: List[str] = None, max_papers: int = 200, use_full_text: bool = False) -> List[Dict]:
-        """Download real papers from arXiv for benchmarking."""
+    def fetch_paper_by_arxiv_id(self, arxiv_id: str, use_full_text: bool = False) -> Optional[Dict]:
+        """Fetch a specific paper by arXiv ID."""
+        cache_file = self.cache_dir / f"arxiv_paper_{arxiv_id.replace('/', '_')}_fulltext_{use_full_text}.json"
+        
+        if cache_file.exists():
+            with open(cache_file) as f:
+                paper = json.load(f)
+                return paper if isinstance(paper, dict) else None
+        
+        try:
+            # Fetch single paper from arXiv API
+            url = f"http://export.arxiv.org/api/query"
+            params = {
+                'id_list': arxiv_id,
+                'max_results': 1
+            }
+            
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            papers = self._parse_arxiv_xml(response.text, use_full_text)
+            if papers:
+                paper = papers[0]
+                with open(cache_file, 'w') as f:
+                    json.dump(paper, f, indent=2)
+                return paper
+        except Exception as e:
+            print(f"⚠️  Error fetching paper {arxiv_id}: {e}")
+        
+        return None
+    
+    def get_arxiv_papers(self, categories: List[str] = None, max_papers: int = 200, use_full_text: bool = False, required_arxiv_ids: Optional[List[str]] = None) -> List[Dict]:
+        """Download real papers from arXiv for benchmarking.
+        
+        Args:
+            categories: List of arXiv categories to fetch from
+            max_papers: Maximum number of papers to fetch
+            use_full_text: Whether to download full text PDFs
+            required_arxiv_ids: Optional list of arXiv IDs that must be included
+        """
         if categories is None:
             categories = ['cs.AI', 'cs.CL', 'cs.LG', 'cs.CV', 'cs.IR', 'cs.NE', 'stat.ML']
         
         papers = []
-        remaining = max_papers
-        total_categories = len(categories)
-        for idx, category in enumerate(categories):
-            if remaining <= 0:
-                break
-            categories_left = total_categories - idx
-            per_category = max(1, math.ceil(remaining / categories_left))
-            fetched = self._fetch_arxiv_category(category, per_category, use_full_text)
-            papers.extend(fetched)
-            remaining = max_papers - len(papers)
+        paper_urls_seen = set()
+        
+        # First, fetch any required papers specified by arXiv ID
+        if required_arxiv_ids:
+            print(f"📥 Fetching {len(required_arxiv_ids)} required papers from query file...")
+            for arxiv_id in required_arxiv_ids:
+                paper = self.fetch_paper_by_arxiv_id(arxiv_id, use_full_text)
+                if paper:
+                    paper_url = paper.get("url", "").strip().lower()
+                    if paper_url and paper_url not in paper_urls_seen:
+                        papers.append(paper)
+                        paper_urls_seen.add(paper_url)
+                        print(f"   ✓ Fetched: {paper.get('title', arxiv_id)[:60]}...")
+        
+        # Then fetch additional papers from categories to reach max_papers
+        remaining = max_papers - len(papers)
+        if remaining > 0:
+            total_categories = len(categories)
+            for idx, category in enumerate(categories):
+                if remaining <= 0:
+                    break
+                categories_left = total_categories - idx
+                per_category = max(1, math.ceil(remaining / categories_left))
+                fetched = self._fetch_arxiv_category(category, per_category, use_full_text)
+                
+                # Deduplicate by URL
+                for paper in fetched:
+                    paper_url = paper.get("url", "").strip().lower()
+                    if paper_url and paper_url not in paper_urls_seen:
+                        papers.append(paper)
+                        paper_urls_seen.add(paper_url)
+                        remaining -= 1
+                        if remaining <= 0:
+                            break
         
         return papers[:max_papers]
     
@@ -602,6 +665,51 @@ class MTEBRetrievalBenchmark:
         """Normalize text keys for matching."""
         return ' '.join(value.lower().split())
     
+    @staticmethod
+    def _extract_arxiv_id(url_or_id: str) -> Optional[str]:
+        """Extract normalized arXiv ID from URL or ID string.
+        
+        Examples:
+            "http://arxiv.org/abs/2510.13804v1" -> "2510.13804v1"
+            "https://arxiv.org/abs/2510.13804" -> "2510.13804"
+            "2510.13804v1" -> "2510.13804v1"
+        """
+        if not url_or_id:
+            return None
+        text = url_or_id.strip()
+        # Extract arXiv ID from URL patterns
+        if 'arxiv.org' in text.lower():
+            if '/abs/' in text:
+                arxiv_id = text.split('/abs/')[-1]
+            elif '/pdf/' in text:
+                arxiv_id = text.split('/pdf/')[-1].replace('.pdf', '')
+            else:
+                return None
+        else:
+            # Assume it's already an arXiv ID
+            arxiv_id = text
+        
+        # Remove query parameters and fragments
+        arxiv_id = arxiv_id.split('?')[0].split('#')[0]
+        return arxiv_id.strip()
+    
+    @staticmethod
+    def _extract_arxiv_ids_from_queries(query_records: Optional[List[Dict]]) -> List[str]:
+        """Extract all unique arXiv IDs from query records."""
+        if not query_records:
+            return []
+        
+        arxiv_ids = set()
+        for record in query_records:
+            for doc in record.get("relevant_documents", []):
+                url = doc.get("url")
+                if url:
+                    arxiv_id = MTEBRetrievalBenchmark._extract_arxiv_id(url)
+                    if arxiv_id:
+                        arxiv_ids.add(arxiv_id)
+        
+        return sorted(list(arxiv_ids))
+    
     def _build_external_queries(
         self,
         papers: List[Dict],
@@ -628,10 +736,22 @@ class MTEBRetrievalBenchmark:
         
         url_to_index = {}
         title_to_index = {}
+        arxiv_id_to_index = {}
+        
         for idx, paper in enumerate(papers):
             url = paper.get("url")
             if url:
-                url_to_index[url.strip().lower()] = idx
+                normalized_url = url.strip().lower()
+                url_to_index[normalized_url] = idx
+                # Also try to extract and index by arXiv ID
+                arxiv_id = self._extract_arxiv_id(url)
+                if arxiv_id:
+                    arxiv_id_to_index[arxiv_id] = idx
+            # Also check arxiv_id field if it exists
+            arxiv_id_direct = paper.get("arxiv_id")
+            if arxiv_id_direct:
+                arxiv_id_to_index[arxiv_id_direct] = idx
+            
             title = paper.get("title")
             if title:
                 title_to_index[self._normalize_key(title)] = idx
@@ -649,10 +769,19 @@ class MTEBRetrievalBenchmark:
                 score = float(doc.get("relevance", 1.0))
                 doc_index = None
                 
+                # Try matching by URL first
                 url = doc.get("url")
                 if url:
-                    doc_index = url_to_index.get(url.strip().lower())
+                    normalized_url = url.strip().lower()
+                    doc_index = url_to_index.get(normalized_url)
+                    
+                    # If no direct match, try matching by arXiv ID
+                    if doc_index is None:
+                        arxiv_id = self._extract_arxiv_id(url)
+                        if arxiv_id:
+                            doc_index = arxiv_id_to_index.get(arxiv_id)
                 
+                # Try matching by title if URL didn't work
                 if doc_index is None:
                     title = doc.get("title")
                     if title:
@@ -958,7 +1087,17 @@ class MTEBRetrievalBenchmark:
         
         # 1. Load academic papers dataset
         print("📚 Loading academic papers dataset...")
-        papers = self.dataset_manager.get_arxiv_papers(max_papers=dataset_size)
+        # Extract arXiv IDs from external queries if provided
+        required_arxiv_ids = None
+        if external_queries:
+            required_arxiv_ids = self._extract_arxiv_ids_from_queries(external_queries)
+            if required_arxiv_ids:
+                print(f"   Found {len(required_arxiv_ids)} unique papers referenced in queries")
+        
+        papers = self.dataset_manager.get_arxiv_papers(
+            max_papers=dataset_size,
+            required_arxiv_ids=required_arxiv_ids
+        )
         print(f"   Loaded {len(papers)} papers")
         
         # 2. Create retrieval queries
@@ -982,6 +1121,7 @@ class MTEBRetrievalBenchmark:
                 f1_score=0.0,
                 mrr=0.0,
                 ndcg=0.0,
+                map_score=0.0,
                 embedding_time=0.0,
                 search_time=0.0,
                 total_documents=len(papers),
@@ -1139,7 +1279,18 @@ class MTEBRetrievalBenchmark:
         
         # 1. Load academic papers dataset with full text
         print("📚 Loading academic papers dataset with full text...")
-        papers = self.dataset_manager.get_arxiv_papers(max_papers=dataset_size, use_full_text=True)
+        # Extract arXiv IDs from external queries if provided
+        required_arxiv_ids = None
+        if external_queries:
+            required_arxiv_ids = self._extract_arxiv_ids_from_queries(external_queries)
+            if required_arxiv_ids:
+                print(f"   Found {len(required_arxiv_ids)} unique papers referenced in queries")
+        
+        papers = self.dataset_manager.get_arxiv_papers(
+            max_papers=dataset_size,
+            use_full_text=True,
+            required_arxiv_ids=required_arxiv_ids
+        )
         
         # Filter papers that have full text chunks
         papers_with_fulltext = [p for p in papers if "full_text_chunks" in p and p["full_text_chunks"]]
@@ -1215,6 +1366,7 @@ class MTEBRetrievalBenchmark:
                 f1_score=0.0,
                 mrr=0.0,
                 ndcg=0.0,
+                map_score=0.0,
                 embedding_time=0.0,
                 search_time=0.0,
                 total_documents=len(chunk_texts),

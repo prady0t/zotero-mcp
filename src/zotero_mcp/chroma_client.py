@@ -130,9 +130,77 @@ class LocalEmbeddingFunction(EmbeddingFunction):
         return "local"
     
     def __call__(self, input: Documents) -> Embeddings:
-        """Generate embeddings using local model."""
-        embeddings = self.model.encode(input, convert_to_numpy=True)
-        return embeddings.tolist()
+        """Generate embeddings using local model.
+        
+        For large inputs, processes in batches to avoid memory issues and
+        handle multiprocessing cleanup better.
+        """
+        if not input:
+            return []
+        
+        # For large batches, process in chunks to avoid memory issues
+        # and improve multiprocessing cleanup
+        batch_size = 128  # Process 128 texts at a time
+        all_embeddings = []
+        
+        # Disable multiprocessing for sentence-transformers to avoid semaphore leaks
+        # This is safer for long-running processes
+        import os
+        original_num_workers = os.environ.get('TOKENIZERS_PARALLELISM', None)
+        os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+        
+        try:
+            total_batches = (len(input) + batch_size - 1) // batch_size
+            
+            for i in range(0, len(input), batch_size):
+                batch = input[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                try:
+                    # Print progress for large batches
+                    if len(input) > 1000 and batch_num % 10 == 0:
+                        import sys
+                        sys.stderr.write(f"   Processing batch {batch_num}/{total_batches} ({i}/{len(input)} texts)...\n")
+                    
+                    # Use show_progress_bar=False to avoid output clutter
+                    # Set batch_size to smaller value to reduce memory pressure
+                    embeddings = self.model.encode(
+                        batch,
+                        convert_to_numpy=True,
+                        show_progress_bar=False,
+                        batch_size=32,  # Smaller batches within the encoding process
+                        normalize_embeddings=False,
+                        device=self.device
+                    )
+                    all_embeddings.append(embeddings)
+                except KeyboardInterrupt:
+                    # Re-enable tokenizers parallelism before re-raising
+                    if original_num_workers is None:
+                        os.environ.pop('TOKENIZERS_PARALLELISM', None)
+                    else:
+                        os.environ['TOKENIZERS_PARALLELISM'] = original_num_workers
+                    raise
+                except Exception as e:
+                    import sys
+                    sys.stderr.write(f"Error encoding batch {batch_num}: {e}\n")
+                    # Re-enable tokenizers parallelism before re-raising
+                    if original_num_workers is None:
+                        os.environ.pop('TOKENIZERS_PARALLELISM', None)
+                    else:
+                        os.environ['TOKENIZERS_PARALLELISM'] = original_num_workers
+                    raise
+        finally:
+            # Always restore the original setting
+            if original_num_workers is None:
+                os.environ.pop('TOKENIZERS_PARALLELISM', None)
+            else:
+                os.environ['TOKENIZERS_PARALLELISM'] = original_num_workers
+        
+        # Concatenate all batches
+        import numpy as np
+        if all_embeddings:
+            combined = np.vstack(all_embeddings)
+            return combined.tolist()
+        return []
 
 
 class ChromaClient:

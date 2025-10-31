@@ -53,12 +53,16 @@ jobs:
         pip install sentence-transformers torch
     
     - name: Run MTEB benchmark
+      timeout-minutes: 30
       run: |
         python mteb_integration_benchmark.py \
           --model "${{ matrix.model }}" \
+          --modes abstract \
           --dataset-size 50 \
           --test-queries 25 \
-          --cache-dir ~/.cache/mteb_benchmark
+          --query-file benchmarks/queries/semantic_retrieval_queries.json \
+          --cache-dir ~/.cache/mteb_benchmark \
+          --output-dir benchmarks/results/ci-run
     
     - name: Upload benchmark results
       uses: actions/upload-artifact@v3
@@ -66,22 +70,56 @@ jobs:
       with:
         name: benchmark-results-${{ matrix.model }}-${{ matrix.python-version }}
         path: |
+          benchmarks/results/ci-run/
           ~/.cache/mteb_benchmark/
         retention-days: 30
+    
+    - name: Extract and summarize metrics
+      if: always()
+      run: |
+        python benchmarks/extract_metrics.py benchmarks/results/ci-run/ || echo "Metrics extraction failed"
     
     - name: Comment PR with results
       if: github.event_name == 'pull_request'
       uses: actions/github-script@v6
+      env:
+        MODEL: ${{ matrix.model }}
       with:
         script: |
           const fs = require('fs');
           const path = require('path');
           
-          // Read benchmark results and create comment
-          const results = "Benchmark completed for ${{ matrix.model }}";
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `## 🚀 MTEB Benchmark Results\n\n${results}`
-          });
+          try {
+            // Try to read summary JSON
+            const summaryPath = 'benchmarks/results/ci-run/summary.json';
+            let results = `## 🚀 MTEB Benchmark Results\n\nModel: ${process.env.MODEL}\n\n`;
+            
+            if (fs.existsSync(summaryPath)) {
+              const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+              const modelResults = summary.filter(r => r.model.includes(process.env.MODEL.split('/').pop()));
+              
+              if (modelResults.length > 0) {
+                const r = modelResults[0];
+                results += `**Abstract Mode:**\n`;
+                results += `- P@1: ${r.accuracy.toFixed(3)}\n`;
+                results += `- P@5: ${r.precision.toFixed(3)}\n`;
+                results += `- MRR: ${r.mrr.toFixed(3)}\n`;
+                results += `- NDCG: ${r.ndcg.toFixed(3)}\n`;
+                results += `- Embedding Time: ${r.embedding_time.toFixed(1)}s\n`;
+              } else {
+                results += "✅ Benchmark completed (results processing in progress)";
+              }
+            } else {
+              results += "✅ Benchmark completed";
+            }
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: results
+            });
+          } catch (error) {
+            console.log('Error creating comment:', error);
+            // Don't fail the workflow if comment creation fails
+          }
