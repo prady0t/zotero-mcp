@@ -31,7 +31,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
     
     - name: Cache dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -39,7 +39,7 @@ jobs:
           ${{ runner.os }}-pip-
     
     - name: Cache MTEB benchmark data
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cache/mteb_benchmark
         key: ${{ runner.os }}-mteb-${{ hashFiles('**/mteb_integration_benchmark.py') }}
@@ -65,7 +65,7 @@ jobs:
           --output-dir benchmarks/results/ci-run
     
     - name: Upload benchmark results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: benchmark-results-${{ matrix.model }}-${{ matrix.python-version }}
@@ -73,11 +73,6 @@ jobs:
           benchmarks/results/ci-run/
           ~/.cache/mteb_benchmark/
         retention-days: 30
-    
-    - name: Extract and summarize metrics
-      if: always()
-      run: |
-        python benchmarks/extract_metrics.py benchmarks/results/ci-run/ || echo "Metrics extraction failed"
     
     - name: Comment PR with results
       if: github.event_name == 'pull_request'
