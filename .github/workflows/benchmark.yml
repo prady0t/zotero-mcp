@@ -65,11 +65,19 @@ jobs:
           --cache-dir ~/.cache/mteb_benchmark \
           --output-dir benchmarks/results/ci-run
     
+    - name: Prepare artifact name
+      if: always()
+      run: |
+        # Sanitize model name for artifact (replace / with -)
+        MODEL_SANITIZED=$(echo "${{ matrix.model }}" | tr '/' '-')
+        ARTIFACT_NAME="benchmark-results-${MODEL_SANITIZED}-${{ matrix.python-version }}"
+        echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+    
     - name: Upload benchmark results
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: benchmark-results-${{ matrix.model }}-${{ matrix.python-version }}
+        name: ${{ env.ARTIFACT_NAME }}
         path: |
           benchmarks/results/ci-run/
           ~/.cache/mteb_benchmark/
