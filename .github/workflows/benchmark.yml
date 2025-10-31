@@ -82,47 +82,156 @@ jobs:
           benchmarks/results/ci-run/
           ~/.cache/mteb_benchmark/
         retention-days: 30
-    
-    - name: Comment PR with results
-      if: github.event_name == 'pull_request'
+
+  comment:
+    needs: benchmark
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Aggregate and compare results
       uses: actions/github-script@v6
-      env:
-        MODEL: ${{ matrix.model }}
       with:
         script: |
           const fs = require('fs');
           const path = require('path');
+          const { execSync } = require('child_process');
           
           try {
-            // Try to read summary JSON
-            const summaryPath = 'benchmarks/results/ci-run/summary.json';
-            let results = `## 🚀 MTEB Benchmark Results\n\nModel: ${process.env.MODEL}\n\n`;
-            
-            if (fs.existsSync(summaryPath)) {
-              const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
-              const modelResults = summary.filter(r => r.model.includes(process.env.MODEL.split('/').pop()));
-              
-              if (modelResults.length > 0) {
-                const r = modelResults[0];
-                results += `**Abstract Mode:**\n`;
-                results += `- P@1: ${r.accuracy.toFixed(3)}\n`;
-                results += `- P@5: ${r.precision.toFixed(3)}\n`;
-                results += `- MRR: ${r.mrr.toFixed(3)}\n`;
-                results += `- NDCG: ${r.ndcg.toFixed(3)}\n`;
-                results += `- Embedding Time: ${r.embedding_time.toFixed(1)}s\n`;
-              } else {
-                results += "✅ Benchmark completed (results processing in progress)";
-              }
-            } else {
-              results += "✅ Benchmark completed";
-            }
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
+            // Get all artifacts from this workflow run
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: results
+              run_id: context.runId
             });
+            
+            const benchmarkArtifacts = artifacts.data.artifacts.filter(a => 
+              a.name.startsWith('benchmark-results-')
+            );
+            
+            if (benchmarkArtifacts.length === 0) {
+              console.log('No benchmark artifacts found');
+              return;
+            }
+            
+            fs.mkdirSync('artifacts', { recursive: true });
+            const allResults = [];
+            
+            // Download and process each artifact
+            for (const artifact of benchmarkArtifacts) {
+              try {
+                const download = await github.rest.actions.downloadArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                  archive_format: 'zip'
+                });
+                
+                const zipPath = path.join('artifacts', `${artifact.id}.zip`);
+                fs.writeFileSync(zipPath, Buffer.from(download.data));
+                
+                // Unzip
+                execSync(`unzip -q -o ${zipPath} -d artifacts/${artifact.id}`, { stdio: 'pipe' });
+                
+                // Look for summary.json
+                const summaryPaths = [
+                  path.join('artifacts', artifact.id.toString(), 'benchmarks', 'results', 'ci-run', 'summary.json'),
+                  path.join('artifacts', artifact.id.toString(), 'summary.json')
+                ];
+                
+                for (const summaryPath of summaryPaths) {
+                  if (fs.existsSync(summaryPath)) {
+                    const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+                    allResults.push(...summary);
+                    break;
+                  }
+                }
+              } catch (err) {
+                console.log(`Error processing artifact ${artifact.name}: ${err.message}`);
+              }
+            }
+            
+            if (allResults.length === 0) {
+              console.log('No results found in artifacts');
+              return;
+            }
+            
+            // Group by model (keep only latest Python version per model for comparison)
+            const modelGroups = {};
+            for (const result of allResults) {
+              const modelName = result.model;
+              if (!modelGroups[modelName]) {
+                modelGroups[modelName] = [];
+              }
+              modelGroups[modelName].push(result);
+            }
+            
+            // Build comparison table
+            let comment = '## 🚀 MTEB Benchmark Results Comparison\n\n';
+            comment += '### Abstract Mode Results\n\n';
+            comment += '| Model | P@1 | P@5 | R@5 | MRR | NDCG@10 | MAP | Embed Time (s) |\n';
+            comment += '|-------|-----|-----|-----|-----|---------|-----|----------------|\n';
+            
+            // Get best values for highlighting
+            const best = {
+              accuracy: Math.max(...allResults.map(r => r.accuracy)),
+              precision: Math.max(...allResults.map(r => r.precision)),
+              mrr: Math.max(...allResults.map(r => r.mrr)),
+              ndcg: Math.max(...allResults.map(r => r.ndcg)),
+              map_score: Math.max(...allResults.map(r => r.map_score))
+            };
+            
+            // Sort by MAP score (descending)
+            const sortedModels = Object.keys(modelGroups).sort((a, b) => {
+              const aMap = Math.max(...modelGroups[a].map(r => r.map_score));
+              const bMap = Math.max(...modelGroups[b].map(r => r.map_score));
+              return bMap - aMap;
+            });
+            
+            for (const modelName of sortedModels) {
+              const results = modelGroups[modelName];
+              // Use the result with highest MAP for display
+              const bestResult = results.reduce((best, curr) => 
+                curr.map_score > best.map_score ? curr : best
+              );
+              
+              const fmt = (val, bestVal) => {
+                const formatted = val.toFixed(3);
+                return Math.abs(val - bestVal) < 0.001 ? `**${formatted}**` : formatted;
+              };
+              
+              comment += `| ${modelName} | ${fmt(bestResult.accuracy, best.accuracy)} | ${fmt(bestResult.precision, best.precision)} | ${bestResult.recall.toFixed(3)} | ${fmt(bestResult.mrr, best.mrr)} | ${fmt(bestResult.ndcg, best.ndcg)} | ${fmt(bestResult.map_score, best.map_score)} | ${bestResult.embedding_time.toFixed(1)} |\n`;
+            }
+            
+            comment += '\n💡 **Bold** values indicate best performance for that metric.\n';
+            
+            // Find existing comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            
+            const botComment = comments.data.find(c => 
+              c.user.type === 'Bot' && c.body.includes('🚀 MTEB Benchmark Results')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
           } catch (error) {
             console.log('Error creating comment:', error);
             // Don't fail the workflow if comment creation fails
