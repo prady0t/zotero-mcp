@@ -1,0 +1,294 @@
+{
+  "queries": [
+    {
+      "id": "q01",
+      "category": "Multimodal Reasoning",
+      "difficulty": 3,
+      "query": "Which paper introduces a plugin-style verifier that can self-generate alternate reasoning paths to audit vision-language answers?",
+      "relevant_documents": [
+        {
+          "title": "Generative Universal Verifier as Multimodal Meta-Reasoner",
+          "url": "http://arxiv.org/abs/2510.13804v1",
+          "relevance": 1.0
+        },
+        {
+          "title": "RECODE: Reasoning Through Code Generation for Visual Question Answering",
+          "url": "http://arxiv.org/abs/2510.13756v1",
+          "relevance": 0.4
+        }
+      ]
+    },
+    {
+      "id": "q02",
+      "category": "Multimodal Models",
+      "difficulty": 2,
+      "query": "I need a fully open recipe for multimodal LLMs that pairs a high-quality corpus with tooling to close the gap with closed models.",
+      "relevant_documents": [
+        {
+          "title": "Bee: A High-Quality Corpus and Full-Stack Suite to Unlock Advanced Fully Open MLLMs",
+          "url": "http://arxiv.org/abs/2510.13795v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q03",
+      "category": "Reinforcement Learning",
+      "difficulty": 3,
+      "query": "Find research describing information-theoretic attacks that guarantee the ability to break reinforcement learning agents.",
+      "relevant_documents": [
+        {
+          "title": "Provably Invincible Adversarial Attacks on Reinforcement Learning Systems: A Rate-Distortion Information-Theoretic Approach",
+          "url": "http://arxiv.org/abs/2510.13792v1",
+          "relevance": 1.0
+        },
+        {
+          "title": "Asymptotically optimal reinforcement learning in Block Markov Decision Processes",
+          "url": "http://arxiv.org/abs/2510.13748v1",
+          "relevance": 0.3
+        }
+      ]
+    },
+    {
+      "id": "q04",
+      "category": "RL Infrastructure",
+      "difficulty": 2,
+      "query": "Which work offers guidance on scheduling compute and data when scaling reinforcement learning fine-tuning for LLMs?",
+      "relevant_documents": [
+        {
+          "title": "The Art of Scaling Reinforcement Learning Compute for LLMs",
+          "url": "http://arxiv.org/abs/2510.13786v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q05",
+      "category": "Robotics",
+      "difficulty": 3,
+      "query": "Looking for a robotics approach that couples spatial grounding with vision-language-action policies to build a generalist robot.",
+      "relevant_documents": [
+        {
+          "title": "InternVLA-M1: A Spatially Guided Vision-Language-Action Framework for Generalist Robot Policy",
+          "url": "http://arxiv.org/abs/2510.13778v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q06",
+      "category": "Long Context Reasoning",
+      "difficulty": 2,
+      "query": "Is there a method that compresses intermediate reasoning traces into lightweight beacons so long-context models can reason efficiently?",
+      "relevant_documents": [
+        {
+          "title": "Breadcrumbs Reasoning: Memory-Efficient Reasoning with Compression Beacons",
+          "url": "http://arxiv.org/abs/2510.13797v1",
+          "relevance": 1.0
+        },
+        {
+          "title": "BRIEF-Pro: Universal Context Compression with Short-to-Long Synthesis for Fast and Accurate Multi-Hop Reasoning",
+          "url": "http://arxiv.org/abs/2510.13799v1",
+          "relevance": 0.7
+        }
+      ]
+    },
+    {
+      "id": "q07",
+      "category": "Long Context Reasoning",
+      "difficulty": 2,
+      "query": "Which paper explains how to synthesize short prompts from long retrieved evidence to keep multi-hop QA both fast and faithful?",
+      "relevant_documents": [
+        {
+          "title": "BRIEF-Pro: Universal Context Compression with Short-to-Long Synthesis for Fast and Accurate Multi-Hop Reasoning",
+          "url": "http://arxiv.org/abs/2510.13799v1",
+          "relevance": 1.0
+        },
+        {
+          "title": "Breadcrumbs Reasoning: Memory-Efficient Reasoning with Compression Beacons",
+          "url": "http://arxiv.org/abs/2510.13797v1",
+          "relevance": 0.6
+        }
+      ]
+    },
+    {
+      "id": "q08",
+      "category": "Recommendation Systems",
+      "difficulty": 2,
+      "query": "Find a sequential recommender that models multiple user interests with LLM reasoning, ideally mixing collaborative signals and language.",
+      "relevant_documents": [
+        {
+          "title": "HyMiRec: A Hybrid Multi-interest Learning Framework for LLM-based Sequential Recommendation",
+          "url": "http://arxiv.org/abs/2510.13738v1",
+          "relevance": 1.0
+        },
+        {
+          "title": "MADREC: A Multi-Aspect Driven LLM Agent for Explainable and Adaptive Recommendation",
+          "url": "http://arxiv.org/abs/2510.13371v1",
+          "relevance": 0.8
+        }
+      ]
+    },
+    {
+      "id": "q09",
+      "category": "Retrieval-Augmented Generation",
+      "difficulty": 3,
+      "query": "Need a retrieval-augmented method that explicitly tracks how knowledge graphs evolve over time to answer questions.",
+      "relevant_documents": [
+        {
+          "title": "RAG Meets Temporal Graphs: Time-Sensitive Modeling and Retrieval for Evolving Knowledge",
+          "url": "http://arxiv.org/abs/2510.13590v1",
+          "relevance": 1.0
+        },
+        {
+          "title": "MADREC: A Multi-Aspect Driven LLM Agent for Explainable and Adaptive Recommendation",
+          "url": "http://arxiv.org/abs/2510.13371v1",
+          "relevance": 0.4
+        }
+      ]
+    },
+    {
+      "id": "q10",
+      "category": "Generative Models",
+      "difficulty": 2,
+      "query": "Which research tackles watermarking content from private diffusion models without introducing noticeable distortions?",
+      "relevant_documents": [
+        {
+          "title": "NoisePrints: Distortion-Free Watermarks for Authorship in Private Diffusion Models",
+          "url": "http://arxiv.org/abs/2510.13793v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q11",
+      "category": "Neuromorphic Computing",
+      "difficulty": 2,
+      "query": "Is there a pipeline for deploying spiking neural networks with diverse synaptic delays onto neuromorphic chips such as Loihi 2?",
+      "relevant_documents": [
+        {
+          "title": "A Complete Pipeline for deploying SNNs with Synaptic Delays on Loihi 2",
+          "url": "http://arxiv.org/abs/2510.13757v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q12",
+      "category": "Physics-Informed Learning",
+      "difficulty": 3,
+      "query": "Looking for a physics-informed inversion framework that injects redundant measurements to stabilize gravitational-wave parameter estimation.",
+      "relevant_documents": [
+        {
+          "title": "APRIL: Auxiliary Physically-Redundant Information in Loss - A physics-informed framework for parameter estimation with a gravitational-wave case study",
+          "url": "http://arxiv.org/abs/2510.13677v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q13",
+      "category": "Simulation-Based Inference",
+      "difficulty": 2,
+      "query": "Need an approach that adapts the prior distribution at inference time for simulation-based Bayesian analysis.",
+      "relevant_documents": [
+        {
+          "title": "PriorGuide: Test-Time Prior Adaptation for Simulation-Based Inference",
+          "url": "http://arxiv.org/abs/2510.13763v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q14",
+      "category": "Reinforcement Learning Theory",
+      "difficulty": 3,
+      "query": "Find results proving asymptotically optimal exploration for reinforcement learning in Block MDP settings.",
+      "relevant_documents": [
+        {
+          "title": "Asymptotically optimal reinforcement learning in Block Markov Decision Processes",
+          "url": "http://arxiv.org/abs/2510.13748v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q15",
+      "category": "Robotics",
+      "difficulty": 2,
+      "query": "Is there an open-source toolkit for training humanoid controllers via motion imitation and reinforcement learning?",
+      "relevant_documents": [
+        {
+          "title": "MimicKit: A Reinforcement Learning Framework for Motion Imitation and Control",
+          "url": "http://arxiv.org/abs/2510.13794v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q16",
+      "category": "Generative Models",
+      "difficulty": 3,
+      "query": "Which paper enforces physical law adherence in video generation models by framing synthesis as a reinforcement learning problem?",
+      "relevant_documents": [
+        {
+          "title": "PhysMaster: Mastering Physical Representation for Video Generation via Reinforcement Learning",
+          "url": "http://arxiv.org/abs/2510.13809v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q17",
+      "category": "Vision-Language Models",
+      "difficulty": 2,
+      "query": "How can vision-language models be adapted to a new video domain using lightweight probes instead of full fine-tuning?",
+      "relevant_documents": [
+        {
+          "title": "VisCoP: Visual Probing for Video Domain Adaptation of Vision Language Models",
+          "url": "http://arxiv.org/abs/2510.13808v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q18",
+      "category": "Neuroimaging",
+      "difficulty": 3,
+      "query": "Looking for a method that aligns high-resolution fMRI flat maps with vision transformers for neural decoding.",
+      "relevant_documents": [
+        {
+          "title": "Scaling Vision Transformers for Functional MRI with Flat Maps",
+          "url": "http://arxiv.org/abs/2510.13768v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q19",
+      "category": "Vision Question Answering",
+      "difficulty": 2,
+      "query": "Which approach turns code generation into a reasoning step to improve visual question answering?",
+      "relevant_documents": [
+        {
+          "title": "RECODE: Reasoning Through Code Generation for Visual Question Answering",
+          "url": "http://arxiv.org/abs/2510.13756v1",
+          "relevance": 1.0
+        }
+      ]
+    },
+    {
+      "id": "q20",
+      "category": "Mathematics Benchmarks",
+      "difficulty": 2,
+      "query": "Find a benchmark that evaluates frontier math solvers by verifying each intermediate derivation rather than just the final answer.",
+      "relevant_documents": [
+        {
+          "title": "Hard2Verify: A Step-Level Verification Benchmark for Open-Ended Frontier Math",
+          "url": "http://arxiv.org/abs/2510.13744v1",
+          "relevance": 1.0
+        }
+      ]
+    }
+  ]
+}
