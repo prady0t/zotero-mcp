@@ -86,7 +86,7 @@ jobs:
   comment:
     needs: benchmark
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: always() && github.event_name == 'pull_request'
     steps:
     - name: Aggregate and compare results
       uses: actions/github-script@v6
@@ -97,6 +97,8 @@ jobs:
           const { execSync } = require('child_process');
           
           try {
+            console.log('Fetching artifacts for run:', context.runId);
+            
             // Get all artifacts from this workflow run
             const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
               owner: context.repo.owner,
@@ -104,12 +106,16 @@ jobs:
               run_id: context.runId
             });
             
+            console.log(`Found ${artifacts.data.artifacts.length} total artifacts`);
+            
             const benchmarkArtifacts = artifacts.data.artifacts.filter(a => 
               a.name.startsWith('benchmark-results-')
             );
             
+            console.log(`Found ${benchmarkArtifacts.length} benchmark artifacts: ${benchmarkArtifacts.map(a => a.name).join(', ')}`);
+            
             if (benchmarkArtifacts.length === 0) {
-              console.log('No benchmark artifacts found');
+              console.error('❌ No benchmark artifacts found');
               return;
             }
             
@@ -119,6 +125,8 @@ jobs:
             // Download and process each artifact
             for (const artifact of benchmarkArtifacts) {
               try {
+                console.log(`Processing artifact: ${artifact.name} (ID: ${artifact.id})`);
+                
                 const download = await github.rest.actions.downloadArtifact({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -128,30 +136,52 @@ jobs:
                 
                 const zipPath = path.join('artifacts', `${artifact.id}.zip`);
                 fs.writeFileSync(zipPath, Buffer.from(download.data));
+                console.log(`Downloaded ${artifact.name} to ${zipPath}`);
                 
                 // Unzip
-                execSync(`unzip -q -o ${zipPath} -d artifacts/${artifact.id}`, { stdio: 'pipe' });
+                const extractDir = path.join('artifacts', artifact.id.toString());
+                execSync(`unzip -q -o ${zipPath} -d ${extractDir}`, { stdio: 'pipe' });
+                console.log(`Extracted to ${extractDir}`);
                 
-                // Look for summary.json
+                // Look for summary.json in various locations
                 const summaryPaths = [
-                  path.join('artifacts', artifact.id.toString(), 'benchmarks', 'results', 'ci-run', 'summary.json'),
-                  path.join('artifacts', artifact.id.toString(), 'summary.json')
+                  path.join(extractDir, 'benchmarks', 'results', 'ci-run', 'summary.json'),
+                  path.join(extractDir, 'summary.json'),
+                  path.join(extractDir, 'benchmarks', 'results', 'summary.json')
                 ];
                 
+                let found = false;
                 for (const summaryPath of summaryPaths) {
                   if (fs.existsSync(summaryPath)) {
+                    console.log(`Found summary.json at: ${summaryPath}`);
                     const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+                    console.log(`Loaded ${summary.length} results from ${summaryPath}`);
                     allResults.push(...summary);
+                    found = true;
                     break;
+                  }
+                }
+                
+                if (!found) {
+                  console.log(`Warning: No summary.json found for ${artifact.name}`);
+                  // List files for debugging
+                  try {
+                    const files = execSync(`find ${extractDir} -type f -name "*.json"`, { encoding: 'utf8' });
+                    console.log(`Found JSON files: ${files}`);
+                  } catch (e) {
+                    console.log(`Could not list files: ${e.message}`);
                   }
                 }
               } catch (err) {
                 console.log(`Error processing artifact ${artifact.name}: ${err.message}`);
+                console.log(err.stack);
               }
             }
             
+            console.log(`Total results collected: ${allResults.length}`);
+            
             if (allResults.length === 0) {
-              console.log('No results found in artifacts');
+              console.error('❌ No results found in any artifacts');
               return;
             }
             
@@ -204,6 +234,8 @@ jobs:
             
             comment += '\n💡 **Bold** values indicate best performance for that metric.\n';
             
+            console.log('Generated comment:', comment.substring(0, 200) + '...');
+            
             // Find existing comment
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -216,6 +248,7 @@ jobs:
             );
             
             if (botComment) {
+              console.log('Updating existing comment:', botComment.id);
               // Update existing comment
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
@@ -223,7 +256,9 @@ jobs:
                 comment_id: botComment.id,
                 body: comment
               });
+              console.log('Comment updated successfully');
             } else {
+              console.log('Creating new comment');
               // Create new comment
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -231,8 +266,10 @@ jobs:
                 issue_number: context.issue.number,
                 body: comment
               });
+              console.log('Comment created successfully');
             }
           } catch (error) {
-            console.log('Error creating comment:', error);
-            // Don't fail the workflow if comment creation fails
+            console.error('❌ Error creating comment:', error);
+            console.error('Error stack:', error.stack);
+            throw error; // This will fail the step
           }
